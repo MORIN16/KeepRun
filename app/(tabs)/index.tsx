@@ -10,6 +10,8 @@ export default function HomeScreen() {
   const theme = Colors.light;
   // State to simulate permission acceptance for now
   const [hasPermission, setHasPermission] = useState(false);
+  const [streakCount, setStreakCount] = useState(7);
+  const [isStreakDayComplete, setIsStreakDayComplete] = useState(true);
 
   // 1. RENDER PERMISSION SCREEN IF NOT GRANTED
   if (!hasPermission) {
@@ -48,7 +50,7 @@ export default function HomeScreen() {
     );
   }
 
-  // 2. RENDER THE RETRO DASHBOARD (Your Grid Layout)
+  // 2. RENDER THE RETRO DASHBOARD 
   return (
     <ScrollView style={[styles.dashboardContainer, { backgroundColor: theme.background }]} contentContainerStyle={{ paddingBottom: 40 }}>
       {/* Top Profile Summary row */}
@@ -57,8 +59,58 @@ export default function HomeScreen() {
           <Text style={styles.summaryTitle}>Summary</Text>
           <Text style={styles.summaryDate}>Sunday, 12 Jul</Text>
         </View>
+
         <View style={styles.avatarCircle}>
           <Text style={styles.avatarText}>MVS</Text>
+        </View>
+      </View>
+
+      {/* Weekly Streak Badge */}
+      <View style={[styles.streakRowCard, { backgroundColor: theme.cardBackground }]}>
+        <View style={styles.streakCardHeader}>
+          <Text style={styles.streakCardTitle}>Weekly Streak</Text>
+          <Pressable style={styles.retroShareButton} onPress={() => console.log('Share Streak')}>
+            <Text style={styles.shareButtonText}>SHARE</Text>
+          </Pressable>
+        </View>
+
+        <View style={styles.streakRowLayout}>
+          <View style={[styles.bigFlameBox, { backgroundColor: isStreakDayComplete ? '#4ADE80' : '#E5E7EB' }]}>
+            <Text style={styles.flameNumber}>{streakCount}</Text>
+            <Text style={styles.flameUnit}>DAYS</Text>
+          </View>
+
+        <View style={styles.daysContainer}>
+          {[
+            { day: 'M', date: '6', done: true },
+            { day: 'T', date: '7', done: true },
+            { day: 'W', date: '8', done: true },
+            { day: 'T', date: '9', done: true },
+            { day: 'F', date: '10', done: true },
+            { day: 'S', date: '11', isIcon: true }, 
+            { day: 'S', date: '12', current: true }, 
+          ].map((item, index) => (
+            <View key={index} style={styles.dayColumn}>
+              <Text style={styles.dayLetter}>{item.day}</Text>
+              <View 
+                  style={[
+                    styles.dayCircle,
+                    item.done && { backgroundColor: theme.primary },
+                    item.isIcon && { backgroundColor: '#000000' },
+                    item.current && { borderColor: theme.primary, borderWidth: 3 }
+                  ]}
+                >
+                  {item.isIcon ? (
+                    <Text style={{ fontSize: 10, color: '#FFF' }}>👟</Text>
+                  ) : (
+                    <Text style={[styles.dayDateText, item.done && { color: '#000' }]}>
+                      {item.date}
+                    </Text>
+                  )}
+                </View>
+              </View>
+            ))}
+          </View>
         </View>
       </View>
 
@@ -80,7 +132,7 @@ export default function HomeScreen() {
       <View style={styles.gridContainer}>
         {/* Card 1: Step Count */}
         <View style={[styles.gridCard, { width: CARD_WIDTH, backgroundColor: theme.cardBackground }]}>
-          <Text style={styles.gridCardTitle}>Step Count ➡️</Text>
+          <Text style={styles.gridCardTitle}>Step Count </Text>
           <Text style={styles.gridCardSub}>Today</Text>
           <Text style={styles.gridNumber}>2,825</Text>
           <View style={styles.fakeChartRow}>
@@ -93,7 +145,7 @@ export default function HomeScreen() {
 
         {/* Card 2: Step Distance */}
         <View style={[styles.gridCard, { width: CARD_WIDTH, backgroundColor: theme.cardBackground }]}>
-          <Text style={styles.gridCardTitle}>Step Distance ➡️</Text>
+          <Text style={styles.gridCardTitle}>Step Distance </Text>
           <Text style={styles.gridCardSub}>Today</Text>
           <Text style={styles.gridNumber}>1,35 KM</Text>
           <View style={styles.fakeChartRow}>
@@ -106,7 +158,7 @@ export default function HomeScreen() {
 
         {/* Card 3: Sessions */}
         <View style={[styles.gridCard, { width: CARD_WIDTH, backgroundColor: theme.cardBackground }]}>
-          <Text style={styles.gridCardTitle}>Sessions ➡️</Text>
+          <Text style={styles.gridCardTitle}>Sessions </Text>
           <View style={styles.badge}><Text style={{fontSize: 12}}>⚡</Text></View>
           <Text style={styles.gridCardSub}>Outdoor Run</Text>
           <Text style={[styles.gridNumber, { color: '#4ADE80' }]}>0,67 KM</Text>
@@ -114,7 +166,7 @@ export default function HomeScreen() {
 
         {/* Card 4: Awards */}
         <View style={[styles.gridCard, { width: CARD_WIDTH, backgroundColor: theme.cardBackground }]}>
-          <Text style={styles.gridCardTitle}>Awards ➡️</Text>
+          <Text style={styles.gridCardTitle}>Awards </Text>
           <View style={styles.awardBadge}>
             <Text style={{ fontSize: 28 }}>🏅</Text>
           </View>
@@ -350,5 +402,92 @@ const styles = StyleSheet.create({
     fontSize: 12,
     fontWeight: '800',
     textAlign: 'center',
+  },
+
+  //streak style
+  streakRowCard: {
+    borderWidth: 3,
+    borderColor: '#000000',
+    padding: 16,
+    marginBottom: 20,
+    shadowColor: '#000000',
+    shadowOffset: { width: 4, height: 4 },
+    shadowOpacity: 1,
+    shadowRadius: 0,
+    elevation: 4,
+  },
+  streakCardHeader: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    alignItems: 'center',
+    marginBottom: 14,
+  },
+  streakCardTitle: {
+    fontSize: 14,
+    fontWeight: '900',
+    letterSpacing: 1,
+  },
+  retroShareButton: {
+    borderWidth: 2,
+    borderColor: '#000000',
+    paddingHorizontal: 8,
+    paddingVertical: 4,
+    backgroundColor: '#FFFDF9',
+  },
+  shareButtonText: {
+    fontSize: 10,
+    fontWeight: '900',
+  },
+  streakRowLayout: {
+    flexDirection: 'row',
+    alignItems: 'center',
+  },
+  bigFlameBox: {
+    borderWidth: 2,
+    borderColor: '#000000',
+    padding: 8,
+    alignItems: 'center',
+    justifyContent: 'center',
+    width: 65,
+    marginRight: 12,
+  },
+  flameNumber: {
+    fontSize: 16,
+    fontWeight: '900',
+    lineHeight: 18,
+  },
+  flameUnit: {
+    fontSize: 9,
+    fontWeight: '800',
+    color: '#333',
+  },
+  daysContainer: {
+    flex: 1,
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+  },
+  dayColumn: {
+    alignItems: 'center',
+    gap: 6,
+  },
+  dayLetter: {
+    fontSize: 11,
+    fontWeight: '800',
+    color: '#666',
+  },
+  dayCircle: {
+    width: 28,
+    height: 28,
+    borderRadius: 14,
+    borderWidth: 2,
+    borderColor: '#000000',
+    backgroundColor: '#E5E7EB',
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  dayDateText: {
+    fontSize: 11,
+    fontWeight: '900',
+    color: '#7F7F7F',
   },
 });
