@@ -1,4 +1,18 @@
-import React, { useState } from "react";
+import Colors from "@/constants/Colors";
+import { auth, db } from "@/firebaseConfig";
+import {
+  collection,
+  doc, // Tambahkan ini untuk TypeScript
+  DocumentData, // Tambahkan ini untuk TypeScript
+  FirestoreError,
+  getDoc,
+  onSnapshot,
+  query, // Tambahkan ini untuk TypeScript
+  QueryDocumentSnapshot, // Tambahkan ini
+  QuerySnapshot,
+  where,
+} from "firebase/firestore";
+import React, { useEffect, useState } from "react";
 import {
   Dimensions,
   Pressable,
@@ -7,56 +21,153 @@ import {
   Text,
   View,
 } from "react-native";
-import Colors from "../../constants/Colors";
 
 const { width } = Dimensions.get("window");
 const CARD_WIDTH = (width - 48 - 16) / 2; // Dynamic 2-column grid sizing
 
+const calculateDistanceFromCoords = (coords: any[]) => {
+  if (!coords || coords.length < 2) return 0;
+  let totalDist = 0;
+  for (let i = 0; i < coords.length - 1; i++) {
+    const p1 = coords[i];
+    const p2 = coords[i + 1];
+    if (p1?.latitude && p1?.longitude && p2?.latitude && p2?.longitude) {
+      const R = 6371; // Radius bumi (KM)
+      const dLat = ((p2.latitude - p1.latitude) * Math.PI) / 180;
+      const dLon = ((p2.longitude - p1.longitude) * Math.PI) / 180;
+      const a =
+        Math.sin(dLat / 2) * Math.sin(dLat / 2) +
+        Math.cos((p1.latitude * Math.PI) / 180) *
+          Math.cos((p2.latitude * Math.PI) / 180) *
+          Math.sin(dLon / 2) *
+          Math.sin(dLon / 2);
+      const c = 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
+      totalDist += R * c;
+    }
+  }
+  return totalDist;
+};
+
 export default function HomeScreen() {
   const theme = Colors.light;
-  // State to simulate permission acceptance for now
-  // const [hasPermission, setHasPermission] = useState(false);
-  const [streakCount, setStreakCount] = useState(7);
-  const [isStreakDayComplete, setIsStreakDayComplete] = useState(true);
 
-  // 1. RENDER PERMISSION SCREEN IF NOT GRANTED
-  // if (!hasPermission) {
-  //   return (
-  //     <View style={[styles.permissionContainer, { backgroundColor: theme.background }]}>
-  //       <View style={styles.header}>
-  //         <KeepRunLogo />
-  //         <Text style={styles.appTitle}>KEEP RUN</Text>
-  //       </View>
+  // User Profile States
+  const [username, setUsername] = useState<string>("Runner");
+  const [initials, setInitials] = useState<string>("RN");
 
-  //       <View style={[styles.retroCard, { backgroundColor: theme.cardBackground }]}>
-  //         <View style={styles.iconCircle}>
-  //           <Text style={{ fontSize: 24 }}>📍</Text>
-  //         </View>
+  // Real Metric States
+  const [totalDistanceAllTime, setTotalDistanceAllTime] = useState<number>(0);
+  const [todayDistance, setTodayDistance] = useState<number>(0);
+  const [todaySteps, setTodaySteps] = useState<number>(0);
+  const [todayKcal, setTodayKcal] = useState<number>(0);
+  const [latestSessionKm, setLatestSessionKm] = useState<number>(0);
+  const [totalSessionsCount, setTotalSessionsCount] = useState<number>(0);
 
-  //         <Text style={styles.cardTitle}>LOCATION ACCESS</Text>
-  //         <Text style={styles.cardBody}>
-  //           To track your running routes and provide precise mapping, Keep Run requires background location access.
-  //         </Text>
+  // Streak States
+  const [streakCount, setStreakCount] = useState(0);
+  const [isStreakDayComplete, setIsStreakDayComplete] = useState(false);
 
-  //         <Pressable
-  //           style={({ pressed }) => [
-  //             styles.retroButton,
-  //             { backgroundColor: theme.primary, transform: [{ translateY: pressed ? 4 : 0 }] }
-  //           ]}
-  //           onPress={() => setHasPermission(true)} // Toggles to Dashboard
-  //         >
-  //           <Text style={styles.buttonText}>GRANT PERMISSION</Text>
-  //         </Pressable>
+  useEffect(() => {
+    const user = auth.currentUser;
+    if (!user) return;
 
-  //         <Pressable onPress={() => console.log('Cancelled')}>
-  //           <Text style={styles.cancelText}>NOT NOW</Text>
-  //         </Pressable>
-  //       </View>
-  //     </View>
-  //   );
-  // }
+    // 1. Fetch data profil user
+    const fetchUserProfile = async () => {
+      try {
+        const userDocRef = doc(db, "users", user.uid);
+        const userDocSnap = await getDoc(userDocRef);
+        if (userDocSnap.exists()) {
+          const userData = userDocSnap.data();
+          const name = userData.username || "Runner";
+          setUsername(name);
+          setInitials(
+            name
+              .split(" ")
+              .map((n: string) => n[0])
+              .join("")
+              .substring(0, 2)
+              .toUpperCase() || "RN",
+          );
+        }
+      } catch (err) {
+        console.error("Gagal memuat profil:", err);
+      }
+    };
 
-  // 2. RENDER THE RETRO DASHBOARD
+    fetchUserProfile();
+
+    // 2. Realtime listener untuk dokumen lari (Runs)
+    const q = query(collection(db, "runs"), where("userId", "==", user.uid));
+
+    // Tambahkan deklarasi tipe data pada parameter callback di bawah ini:
+    const unsubscribe = onSnapshot(
+      q,
+      (querySnapshot: QuerySnapshot<DocumentData>) => {
+        let sumAllTimeKm = 0;
+        let sumTodayKm = 0;
+        let latestKm = 0;
+        let latestTimestamp = 0;
+
+        const startOfToday = new Date();
+        startOfToday.setHours(0, 0, 0, 0);
+        let runTodayFound = false;
+
+        querySnapshot.forEach(
+          (docSnap: QueryDocumentSnapshot<DocumentData>) => {
+            const data = docSnap.data();
+
+            // Ambil distanceKm jika ada, jika tidak kalkulasi otomatis dari array koordinat
+            let dist = Number(data.distanceKm) || 0;
+            if (
+              !dist &&
+              Array.isArray(data.locations) &&
+              data.locations.length > 1
+            ) {
+              dist = calculateDistanceFromCoords(data.locations);
+            } else if (
+              !dist &&
+              Array.isArray(data.coordinates) &&
+              data.coordinates.length > 1
+            ) {
+              dist = calculateDistanceFromCoords(data.coordinates);
+            }
+
+            sumAllTimeKm += dist;
+
+            const runDate = data.createdAt?.toDate
+              ? data.createdAt.toDate()
+              : new Date();
+
+            if (runDate >= startOfToday) {
+              sumTodayKm += dist;
+              runTodayFound = true;
+            }
+
+            const timeSec = data.createdAt?.seconds || 0;
+            if (timeSec >= latestTimestamp) {
+              latestTimestamp = timeSec;
+              latestKm = dist;
+            }
+          },
+        );
+
+        setTotalDistanceAllTime(sumAllTimeKm);
+        setTodayDistance(sumTodayKm);
+        setLatestSessionKm(latestKm);
+        setTotalSessionsCount(querySnapshot.size);
+        setTodaySteps(Math.round(sumTodayKm * 1300));
+        setTodayKcal(Math.round(sumTodayKm * 60));
+        setIsStreakDayComplete(runTodayFound);
+        setStreakCount(runTodayFound ? 1 : 0);
+      },
+      (error: FirestoreError) => {
+        console.error("Gagal realtime listener runs:", error);
+      },
+    );
+
+    return () => unsubscribe();
+  }, []);
+
   return (
     <ScrollView
       style={[styles.dashboardContainer, { backgroundColor: theme.background }]}
@@ -65,12 +176,18 @@ export default function HomeScreen() {
       {/* Top Profile Summary row */}
       <View style={styles.summaryHeader}>
         <View>
-          <Text style={styles.summaryTitle}>Summary</Text>
-          <Text style={styles.summaryDate}>Sunday, 12 Jul</Text>
+          <Text style={styles.summaryTitle}>Halo, {username}!</Text>
+          <Text style={styles.summaryDate}>
+            {new Date().toLocaleDateString("id-ID", {
+              weekday: "long",
+              day: "numeric",
+              month: "short",
+            })}
+          </Text>
         </View>
 
         <View style={styles.avatarCircle}>
-          <Text style={styles.avatarText}>MVS</Text>
+          <Text style={styles.avatarText}>{initials}</Text>
         </View>
       </View>
 
@@ -158,7 +275,7 @@ export default function HomeScreen() {
           <View style={styles.heroStats}>
             <Text style={styles.statLabel}>Move</Text>
             <Text style={[styles.statValue, { color: theme.primary }]}>
-              57/110 KCAL
+              {todayKcal}/110 KCAL
             </Text>
           </View>
         </View>
@@ -175,7 +292,9 @@ export default function HomeScreen() {
         >
           <Text style={styles.gridCardTitle}>Step Count </Text>
           <Text style={styles.gridCardSub}>Today</Text>
-          <Text style={styles.gridNumber}>2,825</Text>
+          <Text style={styles.gridNumber}>
+            {todaySteps.toLocaleString("id-ID")}
+          </Text>
           <View style={styles.fakeChartRow}>
             <View style={[styles.bar, { height: 10 }]} />
             <View style={[styles.bar, { height: 25 }]} />
@@ -198,7 +317,9 @@ export default function HomeScreen() {
         >
           <Text style={styles.gridCardTitle}>Step Distance </Text>
           <Text style={styles.gridCardSub}>Today</Text>
-          <Text style={styles.gridNumber}>1,35 KM</Text>
+          <Text style={styles.gridNumber}>
+            {todayDistance ? todayDistance.toFixed(2) : "0,00"} KM
+          </Text>
           <View style={styles.fakeChartRow}>
             <View style={[styles.bar, { height: 5 }]} />
             <View style={[styles.bar, { height: 15 }]} />
@@ -223,8 +344,12 @@ export default function HomeScreen() {
           <View style={styles.badge}>
             <Text style={{ fontSize: 12 }}>⚡</Text>
           </View>
-          <Text style={styles.gridCardSub}>Outdoor Run</Text>
-          <Text style={[styles.gridNumber, { color: "#4ADE80" }]}>0,67 KM</Text>
+          <Text style={styles.gridCardSub}>
+            {totalSessionsCount} Outdoor Runs
+          </Text>
+          <Text style={[styles.gridNumber, { color: "#4ADE80" }]}>
+            {latestSessionKm ? latestSessionKm.toFixed(2) : "0,00"} KM
+          </Text>
         </View>
 
         {/* Card 4: Awards */}
@@ -238,7 +363,9 @@ export default function HomeScreen() {
           <View style={styles.awardBadge}>
             <Text style={{ fontSize: 28 }}>🏅</Text>
           </View>
-          <Text style={styles.awardLabel}>July Runner</Text>
+          <Text style={styles.awardLabel}>
+            {totalDistanceAllTime >= 10 ? "Pro Runner" : "Starter Runner"}
+          </Text>
         </View>
       </View>
     </ScrollView>
@@ -246,83 +373,6 @@ export default function HomeScreen() {
 }
 
 const styles = StyleSheet.create({
-  /* Permission Styles */
-  permissionContainer: {
-    flex: 1,
-    alignItems: "center",
-    justifyContent: "center",
-    padding: 24,
-  },
-  header: {
-    alignItems: "center",
-    marginBottom: 40,
-  },
-  appTitle: {
-    fontSize: 32,
-    fontWeight: "900",
-    color: "#000000",
-    letterSpacing: 2,
-    marginTop: 10,
-  },
-  retroCard: {
-    borderWidth: 4,
-    borderColor: "#000000",
-    padding: 24,
-    width: "100%",
-    alignItems: "center",
-    shadowColor: "#000000",
-    shadowOffset: { width: 6, height: 6 },
-    shadowOpacity: 1,
-    shadowRadius: 0,
-    elevation: 6,
-  },
-  iconCircle: {
-    width: 60,
-    height: 60,
-    borderRadius: 30,
-    borderWidth: 3,
-    borderColor: "#000000",
-    backgroundColor: "#FFFDF9",
-    alignItems: "center",
-    justifyContent: "center",
-    marginBottom: 16,
-  },
-  cardTitle: {
-    fontSize: 20,
-    fontWeight: "900",
-    color: "#000000",
-    marginBottom: 12,
-  },
-  cardBody: {
-    fontSize: 14,
-    fontWeight: "600",
-    textAlign: "center",
-    color: "#333333",
-    marginBottom: 24,
-  },
-  retroButton: {
-    width: "100%",
-    paddingVertical: 14,
-    borderWidth: 3,
-    borderColor: "#000000",
-    alignItems: "center",
-    shadowColor: "#000000",
-    shadowOffset: { width: 4, height: 4 },
-    shadowOpacity: 1,
-    shadowRadius: 0,
-    marginBottom: 16,
-  },
-  buttonText: {
-    fontSize: 16,
-    fontWeight: "900",
-  },
-  cancelText: {
-    fontSize: 14,
-    fontWeight: "800",
-    color: "#7F7F7F",
-    textDecorationLine: "underline",
-  },
-
   /* Dashboard Styles */
   dashboardContainer: {
     flex: 1,
@@ -472,7 +522,7 @@ const styles = StyleSheet.create({
     textAlign: "center",
   },
 
-  //streak style
+  // streak style
   streakRowCard: {
     borderWidth: 3,
     borderColor: "#000000",

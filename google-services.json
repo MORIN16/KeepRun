@@ -1,0 +1,29 @@
+{
+  "project_info": {
+    "project_number": "94202227841",
+    "project_id": "keeprunapp",
+    "storage_bucket": "keeprunapp.firebasestorage.app"
+  },
+  "client": [
+    {
+      "client_info": {
+        "mobilesdk_app_id": "1:94202227841:android:9ce236973c23cd68d17180",
+        "android_client_info": {
+          "package_name": "com.keeprun.app"
+        }
+      },
+      "oauth_client": [],
+      "api_key": [
+        {
+          "current_key": "AIzaSyDs17P-0hWqknFrs2fARg-VqPnsjGm0eMk"
+        }
+      ],
+      "services": {
+        "appinvite_service": {
+          "other_platform_oauth_client": []
+        }
+      }
+    }
+  ],
+  "configuration_version": "1"
+}

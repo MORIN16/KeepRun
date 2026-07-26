@@ -1,7 +1,16 @@
 import Colors from "@/constants/Colors";
+import { auth, db } from "@/firebaseConfig";
 import * as Location from "expo-location";
+import { addDoc, collection, serverTimestamp } from "firebase/firestore";
 import React, { useEffect, useRef, useState } from "react";
-import { Dimensions, Pressable, StyleSheet, Text, View } from "react-native";
+import {
+  Alert,
+  Dimensions,
+  Pressable,
+  StyleSheet,
+  Text,
+  View,
+} from "react-native";
 import MapView, { Marker, Polyline, PROVIDER_GOOGLE } from "react-native-maps";
 
 interface Coordinate {
@@ -18,6 +27,7 @@ export default function TrackRunScreen() {
   );
   const [routeCoordinates, setRouteCoordinates] = useState<Coordinate[]>([]);
   const [isTracking, setIsTracking] = useState<boolean>(false);
+  const [isPaused, setIsPaused] = useState<boolean>(false);
   const [distance, setDistance] = useState<number>(0); // Dalam kilometer
   const [duration, setDuration] = useState<number>(0); // Dalam detik
 
@@ -35,7 +45,10 @@ export default function TrackRunScreen() {
     (async () => {
       let { status } = await Location.requestForegroundPermissionsAsync();
       if (status !== "granted") {
-        alert("Izin lokasi diperlukan untuk melacak lari!");
+        Alert.alert(
+          "Izin Ditolak",
+          "Izin lokasi diperlukan untuk melacak lari!",
+        );
         return;
       }
 
@@ -46,13 +59,13 @@ export default function TrackRunScreen() {
     })();
 
     return () => {
-      stopTracking();
+      stopLocationUpdates();
     };
   }, []);
 
-  // 2. Timer untuk Durasi Lari
+  // 2. Timer untuk Durasi Lari (Hanya berjalan jika isTracking = true & isPaused = false)
   useEffect(() => {
-    if (isTracking) {
+    if (isTracking && !isPaused) {
       timerRef.current = setInterval(() => {
         setDuration((prev) => prev + 1);
       }, 1000);
@@ -62,15 +75,16 @@ export default function TrackRunScreen() {
         timerRef.current = null;
       }
     }
+
     return () => {
       if (timerRef.current) {
         clearInterval(timerRef.current);
         timerRef.current = null;
       }
     };
-  }, [isTracking]);
+  }, [isTracking, isPaused]);
 
-  // 3. Hitung Jarak Antar 2 Koordinat
+  // 3. Formula Haversine (Hitung Jarak Antar 2 Koordinat)
   const calculateDistance = (newCoord: Coordinate, prevCoord: Coordinate) => {
     const R = 6371; // Jari-jari bumi dalam km
     const dLat = ((newCoord.latitude - prevCoord.latitude) * Math.PI) / 180;
@@ -82,20 +96,34 @@ export default function TrackRunScreen() {
         Math.sin(dLon / 2) *
         Math.sin(dLon / 2);
     const c = 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
-    return R * c; // Hasil dalam kilometer
+    return R * c; // Hasil dalam km
   };
 
-  // 4. Mulai Tracking Lari (Live GPS Update)
+  // 4. Stop Listening ke Sensor GPS
+  const stopLocationUpdates = () => {
+    if (locationSubscription.current) {
+      locationSubscription.current.remove();
+      locationSubscription.current = null;
+    }
+  };
+
+  // 5. Start / Resume Tracking
   const startTracking = async () => {
     setIsTracking(true);
+    setIsPaused(false);
 
     locationSubscription.current = await Location.watchPositionAsync(
       {
         accuracy: Location.Accuracy.BestForNavigation,
-        timeInterval: 2000, // Update tiap 2 detik
-        distanceInterval: 3, // Update tiap pergerakan 3 meter
+        timeInterval: 2000, // Sync tiap 2 detik
+        distanceInterval: 5, // Filter: hanya abaikan jika pergerakan < 5 meter
       },
       (newLocation) => {
+        // [FIX GPS DRIFT 1]: Abaikan jika akurasi lokasi sangat buruk (> 15 meter error)
+        if (newLocation.coords.accuracy && newLocation.coords.accuracy > 15) {
+          return;
+        }
+
         const { latitude, longitude } = newLocation.coords;
         const newCoord = { latitude, longitude };
 
@@ -105,12 +133,19 @@ export default function TrackRunScreen() {
           if (prevCoords.length > 0) {
             const lastCoord = prevCoords[prevCoords.length - 1];
             const addedDistance = calculateDistance(newCoord, lastCoord);
+
+            // [FIX GPS DRIFT 2]: Filter GPS Noise saat diam
+            // Abaikan penambahan jarak jika perpindahan di bawah 5 meter (0.005 km)
+            if (addedDistance < 0.005) {
+              return prevCoords;
+            }
+
             setDistance((prevDist) => prevDist + addedDistance);
           }
           return [...prevCoords, newCoord];
         });
 
-        // Animasikan kamera peta mengikut user
+        // Focus kamera ke lokasi terbaru
         mapRef.current?.animateCamera({
           center: newCoord,
           zoom: 17,
@@ -119,21 +154,60 @@ export default function TrackRunScreen() {
     );
   };
 
-  // 5. Stop / Pause Tracking
-  const stopTracking = () => {
-    if (locationSubscription.current) {
-      locationSubscription.current.remove();
-      locationSubscription.current = null;
-    }
-    setIsTracking(false);
+  // 6. Pause Tracking
+  const pauseTracking = () => {
+    setIsPaused(true);
+    stopLocationUpdates(); // Matikan sensor GPS saat di-pause agar hemat baterai
   };
 
-  // 6. Reset Sesi Lari
-  const resetRun = () => {
-    stopTracking();
-    setRouteCoordinates([]);
-    setDistance(0);
-    setDuration(0);
+  // 7. Resume Tracking
+  const resumeTracking = () => {
+    startTracking();
+  };
+
+  // 8. Finish / Save Run
+  const handleFinishRun = () => {
+    Alert.alert(
+      "Selesai Lari?",
+      `Total Jarak: ${distance.toFixed(2)} KM\nDurasi: ${formatTime(duration)}`,
+      [
+        { text: "Batal", style: "cancel" },
+        {
+          text: "Simpan & Selesai",
+          style: "destructive",
+          onPress: async () => {
+            try {
+              const user = auth.currentUser;
+              if (!user) {
+                Alert.alert("Error", "Kamu harus login terlebih dahulu!");
+                return;
+              }
+
+              // Simpan data lari lengkap dengan userId milik user yang sedang aktif
+              await addDoc(collection(db, "runs"), {
+                userId: user.uid, // <-- Dapatkan ID User aktif
+                distanceKm: parseFloat(distance.toFixed(2)),
+                durationSeconds: duration,
+                routeCoordinates: routeCoordinates,
+                createdAt: serverTimestamp(),
+              });
+
+              Alert.alert("Sukses", "Sesi lari berhasil disimpan!");
+            } catch (error) {
+              console.error("Gagal menyimpan data lari:", error);
+              Alert.alert("Error", "Gagal menyimpan data lari.");
+            } finally {
+              stopLocationUpdates();
+              setIsTracking(false);
+              setIsPaused(false);
+              setRouteCoordinates([]);
+              setDistance(0);
+              setDuration(0);
+            }
+          },
+        },
+      ],
+    );
   };
 
   // Format Timer (MM:SS)
@@ -164,12 +238,12 @@ export default function TrackRunScreen() {
           {routeCoordinates.length > 0 && (
             <Polyline
               coordinates={routeCoordinates}
-              strokeColor="#4ADE80" // Warna hijau neon ala KeepRun
+              strokeColor="#4ADE80"
               strokeWidth={6}
             />
           )}
 
-          {/* Marker Posisi Awal (Start Point) */}
+          {/* Marker Start Point */}
           {routeCoordinates.length > 0 && (
             <Marker coordinate={routeCoordinates[0]} title="Start Point" />
           )}
@@ -180,7 +254,7 @@ export default function TrackRunScreen() {
         </View>
       )}
 
-      {/* STATS OVERLAY CARD (Retro Neo-Brutalism Style) */}
+      {/* STATS OVERLAY CARD */}
       <View
         style={[styles.statsCard, { backgroundColor: theme.cardBackground }]}
       >
@@ -201,6 +275,7 @@ export default function TrackRunScreen() {
         {/* BUTTON CONTROLS */}
         <View style={styles.buttonRow}>
           {!isTracking ? (
+            /* STATE 1: BUMPER AWAL (Belum Mulai Lari) */
             <Pressable
               style={({ pressed }) => [
                 styles.retroButton,
@@ -213,30 +288,45 @@ export default function TrackRunScreen() {
             >
               <Text style={styles.buttonText}>START RUN</Text>
             </Pressable>
+          ) : !isPaused ? (
+            /* STATE 2: SEDANG LARI (Aktif Tracking) */
+            <Pressable
+              style={({ pressed }) => [
+                styles.retroButton,
+                {
+                  backgroundColor: "#F87171", // Merah
+                  transform: [{ translateY: pressed ? 4 : 0 }],
+                },
+              ]}
+              onPress={pauseTracking}
+            >
+              <Text style={styles.buttonText}>PAUSE</Text>
+            </Pressable>
           ) : (
+            /* STATE 3: DI-PAUSE (Menu Resume & Finish) */
             <View style={styles.activeButtonGroup}>
               <Pressable
                 style={({ pressed }) => [
                   styles.retroButtonHalf,
                   {
-                    backgroundColor: "#F87171",
+                    backgroundColor: "#4ADE80", // Hijau Resume
                     transform: [{ translateY: pressed ? 4 : 0 }],
                   },
                 ]}
-                onPress={stopTracking}
+                onPress={resumeTracking}
               >
-                <Text style={styles.buttonText}>PAUSE</Text>
+                <Text style={styles.buttonText}>RESUME</Text>
               </Pressable>
 
               <Pressable
                 style={({ pressed }) => [
                   styles.retroButtonHalf,
                   {
-                    backgroundColor: "#E5E7EB",
+                    backgroundColor: "#E5E7EB", // Abu-abu Finish
                     transform: [{ translateY: pressed ? 4 : 0 }],
                   },
                 ]}
-                onPress={resetRun}
+                onPress={handleFinishRun}
               >
                 <Text style={styles.buttonText}>FINISH</Text>
               </Pressable>
