@@ -22,13 +22,15 @@ import {
   View,
 } from "react-native";
 
-// Tipe data profil user
 interface UserProfile {
   username?: string;
   email?: string;
+  gender?: string;
+  weight?: string | number;
+  height?: string | number;
+  targetKm?: number;
 }
 
-// Tipe data riwayat lari
 interface RunHistory {
   id: string;
   distanceKm?: number;
@@ -45,18 +47,15 @@ export default function ProfileScreen() {
   const [history, setHistory] = useState<RunHistory[]>([]);
   const [loading, setLoading] = useState<boolean>(true);
 
-  // 1. Pantau status Auth: Jika logout, langsung redirect ke /auth
   useEffect(() => {
     const unsubscribe = onAuthStateChanged(auth, (currentUser) => {
       if (!currentUser) {
         router.replace("/auth");
       }
     });
-
     return unsubscribe;
   }, []);
 
-  // 2. Fetch Data Profil & History Lari
   useEffect(() => {
     const fetchProfileAndHistory = async () => {
       if (!user) {
@@ -65,14 +64,12 @@ export default function ProfileScreen() {
       }
 
       try {
-        // Fetch data profil
         const userDocRef = doc(db, "users", user.uid);
         const userDocSnap = await getDoc(userDocRef);
         if (userDocSnap.exists()) {
           setProfileData(userDocSnap.data() as UserProfile);
         }
 
-        // Fetch data riwayat lari
         const q = query(
           collection(db, "runs"),
           where("userId", "==", user.uid),
@@ -86,7 +83,6 @@ export default function ProfileScreen() {
           },
         );
 
-        // Urutkan dari yang terbaru
         runs.sort(
           (a, b) => (b.createdAt?.seconds || 0) - (a.createdAt?.seconds || 0),
         );
@@ -101,7 +97,6 @@ export default function ProfileScreen() {
     fetchProfileAndHistory();
   }, [user]);
 
-  // 3. Fungsi Logout
   const handleSignOut = async () => {
     try {
       await signOut(auth);
@@ -110,7 +105,6 @@ export default function ProfileScreen() {
     }
   };
 
-  // Helper konversi detik ke format MM:SS
   const formatTime = (sec?: number) => {
     if (!sec || isNaN(sec)) return "00:00";
     const mins = Math.floor(sec / 60);
@@ -118,7 +112,6 @@ export default function ProfileScreen() {
     return `${mins.toString().padStart(2, "0")}:${secs.toString().padStart(2, "0")}`;
   };
 
-  // Helper format tanggal & jam
   const formatDate = (createdAt: any) => {
     if (!createdAt?.toDate) return "Baru saja";
     const date = createdAt.toDate();
@@ -139,12 +132,50 @@ export default function ProfileScreen() {
 
   return (
     <View style={[styles.container, { backgroundColor: theme.background }]}>
-      {/* User Info Header */}
+      {/* Header Profile + Settings Button */}
       <View style={styles.profileCard}>
-        <Text style={styles.usernameText}>
-          {profileData?.username || "Runner"}
-        </Text>
-        <Text style={styles.emailText}>{user?.email || "No Email"}</Text>
+        <View style={styles.cardHeaderRow}>
+          <View>
+            <Text style={styles.usernameText}>
+              {profileData?.username || "Runner"}
+            </Text>
+            <Text style={styles.emailText}>{user?.email || "No Email"}</Text>
+          </View>
+
+          {/* Tombol Settings ikon roda gigi */}
+          <Pressable
+            style={styles.settingsIconButton}
+            onPress={() => router.push("/settings")}
+          >
+            <Text style={{ fontSize: 20 }}>⚙️</Text>
+          </Pressable>
+        </View>
+
+        {/* User Details Stats */}
+        <View style={styles.statsRow}>
+          <View style={styles.statBox}>
+            <Text style={styles.statLabel}>TARGET</Text>
+            <Text style={styles.statValue}>
+              {profileData?.targetKm || 2} KM
+            </Text>
+          </View>
+          <View style={styles.statBox}>
+            <Text style={styles.statLabel}>GENDER</Text>
+            <Text style={styles.statValue}>{profileData?.gender || "-"}</Text>
+          </View>
+          <View style={styles.statBox}>
+            <Text style={styles.statLabel}>WEIGHT</Text>
+            <Text style={styles.statValue}>
+              {profileData?.weight ? `${profileData.weight} kg` : "-"}
+            </Text>
+          </View>
+          <View style={styles.statBox}>
+            <Text style={styles.statLabel}>HEIGHT</Text>
+            <Text style={styles.statValue}>
+              {profileData?.height ? `${profileData.height} cm` : "-"}
+            </Text>
+          </View>
+        </View>
 
         <Pressable onPress={handleSignOut} style={styles.signOutButton}>
           <Text style={styles.signOutText}>SIGN OUT</Text>
@@ -184,80 +215,68 @@ export default function ProfileScreen() {
 }
 
 const styles = StyleSheet.create({
-  container: {
-    flex: 1,
-    paddingTop: 60,
-    paddingHorizontal: 20,
-  },
+  container: { flex: 1, paddingTop: 60, paddingHorizontal: 20 },
   profileCard: {
     borderWidth: 3,
-    borderColor: "#000000",
-    backgroundColor: "#FFFFFF",
-    padding: 20,
+    borderColor: "#000",
+    backgroundColor: "#FFF",
+    padding: 18,
     marginBottom: 20,
-    shadowColor: "#000000",
+    shadowColor: "#000",
     shadowOffset: { width: 4, height: 4 },
     shadowOpacity: 1,
-    shadowRadius: 0,
     elevation: 4,
   },
-  usernameText: {
-    fontSize: 22,
-    fontWeight: "900",
-    color: "#000000",
+  cardHeaderRow: {
+    flexDirection: "row",
+    justifyContent: "space-between",
+    alignItems: "flex-start",
   },
-  emailText: {
-    fontSize: 14,
-    color: "#666666",
-    marginTop: 4,
-    fontWeight: "600",
+  usernameText: { fontSize: 22, fontWeight: "900", color: "#000" },
+  emailText: { fontSize: 13, color: "#666", marginTop: 2, fontWeight: "600" },
+  settingsIconButton: {
+    borderWidth: 2,
+    borderColor: "#000",
+    padding: 6,
+    backgroundColor: "#F3F4F6",
   },
+  statsRow: {
+    flexDirection: "row",
+    justifyContent: "space-between",
+    marginTop: 16,
+    paddingTop: 12,
+    borderTopWidth: 2,
+    borderTopColor: "#EEE",
+  },
+  statBox: { alignItems: "center" },
+  statLabel: { fontSize: 10, fontWeight: "800", color: "#888" },
+  statValue: { fontSize: 14, fontWeight: "900", marginTop: 2 },
   signOutButton: {
     marginTop: 16,
     paddingVertical: 10,
     backgroundColor: "#F87171",
     borderWidth: 2,
-    borderColor: "#000000",
+    borderColor: "#000",
     alignItems: "center",
   },
-  signOutText: {
-    color: "#FFFFFF",
-    fontWeight: "900",
-  },
-  sectionTitle: {
-    fontSize: 16,
-    fontWeight: "900",
-    marginBottom: 12,
-  },
+  signOutText: { color: "#FFF", fontWeight: "900" },
+  sectionTitle: { fontSize: 16, fontWeight: "900", marginBottom: 12 },
   historyCard: {
     borderWidth: 2,
-    borderColor: "#000000",
-    backgroundColor: "#FFFFFF",
+    borderColor: "#000",
+    backgroundColor: "#FFF",
     padding: 14,
     marginBottom: 10,
     flexDirection: "row",
     justifyContent: "space-between",
     alignItems: "center",
   },
-  historyDistance: {
-    fontSize: 18,
-    fontWeight: "900",
-    color: "#10B981", // Hijau kontras neo-brutalism
-  },
-  historyTime: {
-    fontSize: 12,
-    fontWeight: "700",
-    color: "#666666",
-    marginTop: 2,
-  },
-  historyDate: {
-    fontSize: 12,
-    fontWeight: "800",
-    color: "#333333",
-  },
+  historyDistance: { fontSize: 18, fontWeight: "900", color: "#10B981" },
+  historyTime: { fontSize: 12, fontWeight: "700", color: "#666", marginTop: 2 },
+  historyDate: { fontSize: 12, fontWeight: "800", color: "#333" },
   emptyText: {
     textAlign: "center",
-    color: "#888888",
+    color: "#888",
     marginTop: 20,
     fontWeight: "700",
   },

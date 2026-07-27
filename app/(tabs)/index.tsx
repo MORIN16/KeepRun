@@ -54,6 +54,7 @@ export default function HomeScreen() {
   // User Profile States
   const [username, setUsername] = useState<string>("Runner");
   const [initials, setInitials] = useState<string>("RN");
+  const [userTargetKm, setUserTargetKm] = useState<number>(2);
 
   // Real Metric States
   const [totalDistanceAllTime, setTotalDistanceAllTime] = useState<number>(0);
@@ -66,6 +67,9 @@ export default function HomeScreen() {
   // Streak States
   const [streakCount, setStreakCount] = useState(0);
   const [isStreakDayComplete, setIsStreakDayComplete] = useState(false);
+  const [weeklyDaysStatus, setWeeklyDaysStatus] = useState<
+    { day: string; date: string; done: boolean; current?: boolean }[]
+  >([]);
 
   useEffect(() => {
     const user = auth.currentUser;
@@ -79,7 +83,9 @@ export default function HomeScreen() {
         if (userDocSnap.exists()) {
           const userData = userDocSnap.data();
           const name = userData.username || "Runner";
+          const target = Number(userData.targetKm) || 2;
           setUsername(name);
+          setUserTargetKm(target);
           setInitials(
             name
               .split(" ")
@@ -108,9 +114,10 @@ export default function HomeScreen() {
         let latestKm = 0;
         let latestTimestamp = 0;
 
-        const startOfToday = new Date();
-        startOfToday.setHours(0, 0, 0, 0);
-        let runTodayFound = false;
+        // const startOfToday = new Date();
+        // startOfToday.setHours(0, 0, 0, 0);
+        // let runTodayFound = false;
+        const dailyDistanceMap: { [key: string]: number } = {};
 
         querySnapshot.forEach(
           (docSnap: QueryDocumentSnapshot<DocumentData>) => {
@@ -138,9 +145,16 @@ export default function HomeScreen() {
               ? data.createdAt.toDate()
               : new Date();
 
-            if (runDate >= startOfToday) {
+            // if (runDate >= startOfToday) {
+            //   sumTodayKm += dist;
+            //   runTodayFound = true;
+            // }
+            const dateKey = runDate.toISOString().split("T")[0];
+            dailyDistanceMap[dateKey] = (dailyDistanceMap[dateKey] || 0) + dist;
+
+            const todayKey = new Date().toISOString().split("T")[0];
+            if (dateKey === todayKey) {
               sumTodayKm += dist;
-              runTodayFound = true;
             }
 
             const timeSec = data.createdAt?.seconds || 0;
@@ -151,14 +165,63 @@ export default function HomeScreen() {
           },
         );
 
+        // Kalkulasi Streak Consecutive Days
+        const target = userTargetKm || 2;
+        let currentStreak = 0;
+        let checkDate = new Date();
+
+        // Cek hari ini
+        const todayStr = checkDate.toISOString().split("T")[0];
+        const todayDist = dailyDistanceMap[todayStr] || 0;
+        const todayAchieved = todayDist >= target;
+
+        if (todayAchieved) {
+          currentStreak++;
+          checkDate.setDate(checkDate.getDate() - 1);
+        } else {
+          // Jika hari ini belum selesai target, cek apakah kemarin streak berlanjut
+          checkDate.setDate(checkDate.getDate() - 1);
+        }
+
+        while (true) {
+          const key = checkDate.toISOString().split("T")[0];
+          if ((dailyDistanceMap[key] || 0) >= target) {
+            currentStreak++;
+            checkDate.setDate(checkDate.getDate() - 1);
+          } else {
+            break; // Streak terputus
+          }
+        }
+
+        // Buat Array 7 Hari Terakhir untuk UI Weekly Streak
+        const dayLabels = ["S", "M", "T", "W", "T", "F", "S"];
+        const weeklyList = [];
+        for (let i = 6; i >= 0; i--) {
+          const d = new Date();
+          d.setDate(d.getDate() - i);
+          const key = d.toISOString().split("T")[0];
+          const distOnDay = dailyDistanceMap[key] || 0;
+
+          weeklyList.push({
+            day: dayLabels[d.getDay()],
+            date: d.getDate().toString(),
+            done: distOnDay >= target,
+            current: i === 0,
+          });
+        }
+
+        setWeeklyDaysStatus(weeklyList);
+        setStreakCount(currentStreak);
+        setIsStreakDayComplete(todayAchieved);
+
         setTotalDistanceAllTime(sumAllTimeKm);
         setTodayDistance(sumTodayKm);
         setLatestSessionKm(latestKm);
         setTotalSessionsCount(querySnapshot.size);
         setTodaySteps(Math.round(sumTodayKm * 1300));
         setTodayKcal(Math.round(sumTodayKm * 60));
-        setIsStreakDayComplete(runTodayFound);
-        setStreakCount(runTodayFound ? 1 : 0);
+        // setIsStreakDayComplete(runTodayFound);
+        // setStreakCount(runTodayFound ? 1 : 0);
       },
       (error: FirestoreError) => {
         console.error("Gagal realtime listener runs:", error);
@@ -166,7 +229,7 @@ export default function HomeScreen() {
     );
 
     return () => unsubscribe();
-  }, []);
+  }, [userTargetKm]);
 
   return (
     <ScrollView
@@ -199,7 +262,9 @@ export default function HomeScreen() {
         ]}
       >
         <View style={styles.streakCardHeader}>
-          <Text style={styles.streakCardTitle}>Weekly Streak</Text>
+          <Text style={styles.streakCardTitle}>
+            WEEKLY STREAK (TARGET: {userTargetKm} KM/DAY)
+          </Text>
           <Pressable
             style={styles.retroShareButton}
             onPress={() => console.log("Share Streak")}
@@ -212,7 +277,7 @@ export default function HomeScreen() {
           <View
             style={[
               styles.bigFlameBox,
-              { backgroundColor: isStreakDayComplete ? "#4ADE80" : "#E5E7EB" },
+              { backgroundColor: isStreakDayComplete ? "#4ADE80" : "#FFC107" },
             ]}
           >
             <Text style={styles.flameNumber}>{streakCount}</Text>
@@ -220,40 +285,27 @@ export default function HomeScreen() {
           </View>
 
           <View style={styles.daysContainer}>
-            {[
-              { day: "M", date: "6", done: true },
-              { day: "T", date: "7", done: true },
-              { day: "W", date: "8", done: true },
-              { day: "T", date: "9", done: true },
-              { day: "F", date: "10", done: true },
-              { day: "S", date: "11", isIcon: true },
-              { day: "S", date: "12", current: true },
-            ].map((item, index) => (
+            {weeklyDaysStatus.map((item, index) => (
               <View key={index} style={styles.dayColumn}>
                 <Text style={styles.dayLetter}>{item.day}</Text>
                 <View
                   style={[
                     styles.dayCircle,
                     item.done && { backgroundColor: theme.primary },
-                    item.isIcon && { backgroundColor: "#000000" },
                     item.current && {
                       borderColor: theme.primary,
                       borderWidth: 3,
                     },
                   ]}
                 >
-                  {item.isIcon ? (
-                    <Text style={{ fontSize: 10, color: "#FFF" }}>👟</Text>
-                  ) : (
-                    <Text
-                      style={[
-                        styles.dayDateText,
-                        item.done && { color: "#000" },
-                      ]}
-                    >
-                      {item.date}
-                    </Text>
-                  )}
+                  <Text
+                    style={[
+                      styles.dayDateText,
+                      item.done && { color: "#000", fontWeight: "900" },
+                    ]}
+                  >
+                    {item.date}
+                  </Text>
                 </View>
               </View>
             ))}
