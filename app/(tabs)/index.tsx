@@ -1,5 +1,6 @@
 import Colors from "@/constants/Colors";
 import { auth, db } from "@/firebaseConfig";
+import { useRouter } from "expo-router";
 import {
   collection,
   doc, // Tambahkan ini untuk TypeScript
@@ -17,6 +18,7 @@ import {
   Dimensions,
   Pressable,
   ScrollView,
+  Share,
   StyleSheet,
   Text,
   View,
@@ -50,6 +52,7 @@ const calculateDistanceFromCoords = (coords: any[]) => {
 
 export default function HomeScreen() {
   const theme = Colors.light;
+  const router = useRouter();
 
   // User Profile States
   const [username, setUsername] = useState<string>("Runner");
@@ -231,6 +234,16 @@ export default function HomeScreen() {
     return () => unsubscribe();
   }, [userTargetKm]);
 
+  const handleShareStreak = async () => {
+    try {
+      await Share.share({
+        message: `🔥 Saya sudah menjaga Streak Lari selama ${streakCount} hari berturut-turut di aplikasi Running Tracker! Yuk lari bareng! 🏃‍♂️💨`,
+      });
+    } catch (error) {
+      console.error("Gagal membagikan streak:", error);
+    }
+  };
+
   return (
     <ScrollView
       style={[styles.dashboardContainer, { backgroundColor: theme.background }]}
@@ -267,7 +280,7 @@ export default function HomeScreen() {
           </Text>
           <Pressable
             style={styles.retroShareButton}
-            onPress={() => console.log("Share Streak")}
+            onPress={handleShareStreak}
           >
             <Text style={styles.shareButtonText}>SHARE</Text>
           </Pressable>
@@ -284,32 +297,37 @@ export default function HomeScreen() {
             <Text style={styles.flameUnit}>DAYS</Text>
           </View>
 
-          <View style={styles.daysContainer}>
-            {weeklyDaysStatus.map((item, index) => (
-              <View key={index} style={styles.dayColumn}>
-                <Text style={styles.dayLetter}>{item.day}</Text>
-                <View
-                  style={[
-                    styles.dayCircle,
-                    item.done && { backgroundColor: theme.primary },
-                    item.current && {
-                      borderColor: theme.primary,
-                      borderWidth: 3,
-                    },
-                  ]}
-                >
-                  <Text
+          <Pressable
+            style={{ flex: 1 }}
+            onPress={() => router.push("/calendar")}
+          >
+            <View style={styles.daysContainer}>
+              {weeklyDaysStatus.map((item, index) => (
+                <View key={index} style={styles.dayColumn}>
+                  <Text style={styles.dayLetter}>{item.day}</Text>
+                  <View
                     style={[
-                      styles.dayDateText,
-                      item.done && { color: "#000", fontWeight: "900" },
+                      styles.dayCircle,
+                      item.done && { backgroundColor: theme.primary },
+                      item.current && {
+                        borderColor: theme.primary,
+                        borderWidth: 3,
+                      },
                     ]}
                   >
-                    {item.date}
-                  </Text>
+                    <Text
+                      style={[
+                        styles.dayDateText,
+                        item.done && { color: "#000", fontWeight: "900" },
+                      ]}
+                    >
+                      {item.date}
+                    </Text>
+                  </View>
                 </View>
-              </View>
-            ))}
-          </View>
+              ))}
+            </View>
+          </Pressable>
         </View>
       </View>
 

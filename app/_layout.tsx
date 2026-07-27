@@ -62,6 +62,10 @@ function RootLayoutNav() {
           name="settings"
           options={{ presentation: "card", headerShown: false }}
         />
+        <Stack.Screen
+          name="calendar"
+          options={{ presentation: "card", headerShown: false }}
+        />
         <Stack.Screen name="(tabs)" options={{ headerShown: false }} />
         <Stack.Screen name="modal" options={{ presentation: "modal" }} />
       </Stack>
