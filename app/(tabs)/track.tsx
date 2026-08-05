@@ -6,9 +6,11 @@ import React, { useEffect, useRef, useState } from "react";
 import {
   Alert,
   Dimensions,
+  Modal,
   Pressable,
   StyleSheet,
   Text,
+  TouchableOpacity,
   View,
 } from "react-native";
 import MapView, { Marker, Polyline, PROVIDER_GOOGLE } from "react-native-maps";
@@ -16,6 +18,12 @@ import MapView, { Marker, Polyline, PROVIDER_GOOGLE } from "react-native-maps";
 interface Coordinate {
   latitude: number;
   longitude: number;
+}
+
+interface CoinCheckpoint {
+  id: string;
+  coordinate: Coordinate;
+  isCollected: boolean;
 }
 
 export default function TrackRunScreen() {
@@ -31,14 +39,24 @@ export default function TrackRunScreen() {
   const [distance, setDistance] = useState<number>(0); // Dalam kilometer
   const [duration, setDuration] = useState<number>(0); // Dalam detik
 
+  // Game Mode States
+  const [isGameModeActive, setIsGameModeActive] = useState<boolean>(false);
+  const [isModalVisible, setIsModalVisible] = useState<boolean>(false);
+  const [gameRoute, setGameRoute] = useState<Coordinate[]>([]);
+  const [coins, setCoins] = useState<CoinCheckpoint[]>([]);
+  const [score, setScore] = useState<number>(0);
+
   // Refs
   const locationSubscription = useRef<Location.LocationSubscription | null>(
     null,
   );
+  // const timerRef = useRef<NodeJS.Timeout | ReturnType<typeof setInterval> | OnErrorEventHandlerNonNull>(null);
   const timerRef = useRef<
     NodeJS.Timeout | ReturnType<typeof setInterval> | null
   >(null);
   const mapRef = useRef<MapView | null>(null);
+  const coinsRef = useRef<CoinCheckpoint[]>([]);
+  coinsRef.current = coins;
 
   // 1. Request Izin & Dapatkan Lokasi Awal
   useEffect(() => {
@@ -99,7 +117,117 @@ export default function TrackRunScreen() {
     return R * c; // Hasil dalam km
   };
 
-  // 4. Stop Listening ke Sensor GPS
+  // Helper: Pindah koordinat berdasarkan jarak (meter) & sudut (bearing)
+  const moveCoordinate = (
+    coord: Coordinate,
+    distanceMeters: number,
+    bearingDegrees: number,
+  ) => {
+    const R = 6371000; // Radius bumi dalam meter
+    const d = distanceMeters;
+    const brng = (bearingDegrees * Math.PI) / 180;
+    const lat1 = (coord.latitude * Math.PI) / 180;
+    const lon1 = (coord.longitude * Math.PI) / 180;
+
+    const lat2 = Math.asin(
+      Math.sin(lat1) * Math.cos(d / R) +
+        Math.cos(lat1) * Math.sin(d / R) * Math.cos(brng),
+    );
+    const lon2 =
+      lon1 +
+      Math.atan2(
+        Math.sin(brng) * Math.sin(d / R) * Math.cos(lat1),
+        Math.cos(d / R) - Math.sin(lat1) * Math.sin(lat2),
+      );
+
+    return {
+      latitude: (lat2 * 180) / Math.PI,
+      longitude: (lon2 * 180) / Math.PI,
+    };
+  };
+
+  // 4. Generator Rute Game & Koin Checkpoint (Tiap 200 meter)
+  const generateGameRouteAndCoins = (targetDistanceKm: number) => {
+    if (!location) return;
+
+    const start = {
+      latitude: location.coords.latitude,
+      longitude: location.coords.longitude,
+    };
+
+    const newGameRoute: Coordinate[] = [start];
+    const newCoins: CoinCheckpoint[] = [];
+
+    const totalMeters = targetDistanceKm * 1000;
+    const stepMeters = 50; // sampel titik tiap 50m
+    let accumulatedMeters = 0;
+    let coinCounter = 0;
+
+    let currentCoord = start;
+    let currentBearing = 45; // Arah lintasan awal (derajat)
+
+    while (accumulatedMeters < totalMeters) {
+      accumulatedMeters += stepMeters;
+
+      // Sedikit belokan acak agar lintasan menyerupai jalanan
+      if (accumulatedMeters % 300 === 0) {
+        currentBearing += (Math.random() - 0.5) * 60;
+      }
+
+      currentCoord = moveCoordinate(currentCoord, stepMeters, currentBearing);
+      newGameRoute.push(currentCoord);
+
+      // Taruh koin setiap kelipatan 200 meter
+      if (accumulatedMeters % 200 === 0) {
+        coinCounter += 1;
+        newCoins.push({
+          id: `coin-${coinCounter}`,
+          coordinate: currentCoord,
+          isCollected: false,
+        });
+      }
+    }
+
+    setGameRoute(newGameRoute);
+    setCoins(newCoins);
+    setIsGameModeActive(true);
+    setScore(0);
+    setIsModalVisible(false);
+
+    Alert.alert(
+      "Game Mode On! 🎮",
+      `Rute ${targetDistanceKm} KM telah dibuat dengan ${newCoins.length} koin pacman. Ayo kumpulkan semua koin!`,
+    );
+  };
+
+  // 5. Cek Koin yang Dimakan (Pac-Man Logic)
+  const checkCoinCollection = (userCoord: Coordinate) => {
+    let updatedScore = 0;
+    let isAnyCollected = false;
+
+    const newCoins = coinsRef.current.map((coin) => {
+      if (!coin.isCollected) {
+        const distKm = calculateDistance(userCoord, coin.coordinate);
+        const distMeters = distKm * 1000;
+
+        // Jika jarak user ke koin < 5 meter, anggap koin termakan!
+        if (distMeters <= 5) {
+          isAnyCollected = true;
+          return { ...coin, isCollected: true };
+        }
+      }
+      return coin;
+    });
+
+    if (isAnyCollected) {
+      // Hitung skor baru
+      const collectedCount = newCoins.filter((c) => c.isCollected).length;
+      setScore(collectedCount * 10);
+      setCoins(newCoins);
+    }
+  };
+
+  // 6. Stop Listening ke Sensor GPS
   const stopLocationUpdates = () => {
     if (locationSubscription.current) {
       locationSubscription.current.remove();
@@ -107,7 +235,7 @@ export default function TrackRunScreen() {
     }
   };
 
-  // 5. Start / Resume Tracking
+  // 7. Start / Resume Tracking
   const startTracking = async () => {
     setIsTracking(true);
     setIsPaused(false);
@@ -145,6 +273,10 @@ export default function TrackRunScreen() {
           return [...prevCoords, newCoord];
         });
 
+        if (isGameModeActive) {
+          checkCoinCollection(newCoord);
+        }
+
         // Focus kamera ke lokasi terbaru
         mapRef.current?.animateCamera({
           center: newCoord,
@@ -154,18 +286,18 @@ export default function TrackRunScreen() {
     );
   };
 
-  // 6. Pause Tracking
+  // 8. Pause Tracking
   const pauseTracking = () => {
     setIsPaused(true);
     stopLocationUpdates(); // Matikan sensor GPS saat di-pause agar hemat baterai
   };
 
-  // 7. Resume Tracking
+  // 9. Resume Tracking
   const resumeTracking = () => {
     startTracking();
   };
 
-  // 8. Finish / Save Run
+  // 10. Finish / Save Run
   const handleFinishRun = () => {
     Alert.alert(
       "Selesai Lari?",
@@ -179,7 +311,7 @@ export default function TrackRunScreen() {
             try {
               const user = auth.currentUser;
               if (!user) {
-                Alert.alert("Error", "Kamu harus login terlebih dahulu!");
+                Alert.alert("Error", "Harus login terlebih dahulu!");
                 return;
               }
 
@@ -189,6 +321,8 @@ export default function TrackRunScreen() {
                 distanceKm: parseFloat(distance.toFixed(2)),
                 durationSeconds: duration,
                 routeCoordinates: routeCoordinates,
+                score: isGameModeActive ? score : 0,
+                isGameMode: isGameModeActive,
                 createdAt: serverTimestamp(),
               });
 
@@ -201,6 +335,10 @@ export default function TrackRunScreen() {
               setIsTracking(false);
               setIsPaused(false);
               setRouteCoordinates([]);
+              setGameRoute([]);
+              setCoins([]);
+              setIsGameModeActive(false);
+              setScore(0);
               setDistance(0);
               setDuration(0);
             }
@@ -234,6 +372,15 @@ export default function TrackRunScreen() {
           showsUserLocation={true}
           followsUserLocation={true}
         >
+          {isGameModeActive && gameRoute.length > 0 && (
+            <Polyline
+              coordinates={gameRoute}
+              strokeColor="#FBBF24"
+              strokeWidth={5}
+              lineDashPattern={[10, 5]}
+            />
+          )}
+
           {/* Garis Rute Lari */}
           {routeCoordinates.length > 0 && (
             <Polyline
@@ -247,12 +394,86 @@ export default function TrackRunScreen() {
           {routeCoordinates.length > 0 && (
             <Marker coordinate={routeCoordinates[0]} title="Start Point" />
           )}
+
+          {/* Marker Koin Checkpoints */}
+          {isGameModeActive &&
+            coins.map(
+              (coin) =>
+                !coin.isCollected && (
+                  <Marker
+                    key={coin.id}
+                    coordinate={coin.coordinate}
+                    title="Coin (+10 pts)"
+                    anchor={{ x: 0.5, y: 0.5 }}
+                  >
+                    <View style={styles.coinMarker}>
+                      <Text style={styles.coinText}>🪙</Text>
+                    </View>
+                  </Marker>
+                ),
+            )}
         </MapView>
       ) : (
         <View style={styles.loadingContainer}>
           <Text style={styles.loadingText}>Mencari Sinyal GPS...</Text>
         </View>
       )}
+
+      <TouchableOpacity
+        style={[
+          styles.gameModeButton,
+          isGameModeActive && styles.gameModeButtonActive,
+        ]}
+        onPress={() => setIsModalVisible(true)}
+      >
+        <Text style={styles.gameModeButtonText}>
+          {isGameModeActive ? `🎮 ${score} PTS` : "🎮 GAME MODE"}
+        </Text>
+      </TouchableOpacity>
+
+      <Modal
+        visible={isModalVisible}
+        transparent={true}
+        animationType="slide"
+        onRequestClose={() => setIsModalVisible(false)}
+      >
+        <View style={styles.modalOverlay}>
+          <View style={styles.modalContent}>
+            <Text style={styles.modalTitle}>🎮 PILIH RUTE GAME</Text>
+            <Text style={styles.modalSubtitle}>
+              Kumpulkan koin 🪙 setiap 200 meter sepanjang rute pilihanmu!
+            </Text>
+
+            <Pressable
+              style={styles.routeOptionButton}
+              onPress={() => generateGameRouteAndCoins(1)}
+            >
+              <Text style={styles.routeOptionText}>🏃‍♂️ Rute 1 KM (5 Koin)</Text>
+            </Pressable>
+
+            <Pressable
+              style={styles.routeOptionButton}
+              onPress={() => generateGameRouteAndCoins(2)}
+            >
+              <Text style={styles.routeOptionText}>🏃‍♂️ Rute 2 KM (10 Koin)</Text>
+            </Pressable>
+
+            <Pressable
+              style={styles.routeOptionButton}
+              onPress={() => generateGameRouteAndCoins(5)}
+            >
+              <Text style={styles.routeOptionText}>🏃‍♂️ Rute 5 KM (25 Koin)</Text>
+            </Pressable>
+
+            <Pressable
+              style={styles.closeModalButton}
+              onPress={() => setIsModalVisible(false)}
+            >
+              <Text style={styles.closeModalText}>BATAL</Text>
+            </Pressable>
+          </View>
+        </View>
+      </Modal>
 
       {/* STATS OVERLAY CARD */}
       <View
@@ -265,6 +486,13 @@ export default function TrackRunScreen() {
               {distance.toFixed(2)} <Text style={styles.unit}>KM</Text>
             </Text>
           </View>
+
+          {isGameModeActive && (
+            <View style={styles.metricItem}>
+              <Text style={styles.metricLabel}>SCORE</Text>
+              <Text style={styles.metricValue}>{score}</Text>
+            </View>
+          )}
 
           <View style={styles.metricItem}>
             <Text style={styles.metricLabel}>TIME</Text>
@@ -356,6 +584,108 @@ const styles = StyleSheet.create({
     fontWeight: "900",
     fontSize: 16,
   },
+  //game mode button
+  gameModeButton: {
+    position: "absolute",
+    top: 50,
+    right: 20,
+    backgroundColor: "#FBBF24",
+    borderWidth: 3,
+    borderColor: "#000",
+    paddingVertical: 10,
+    paddingHorizontal: 16,
+    shadowColor: "#000",
+    shadowOffset: { width: 4, height: 4 },
+    shadowOpacity: 1,
+    shadowRadius: 0,
+    elevation: 5,
+    zIndex: 10,
+  },
+  gameModeButtonActive: {
+    backgroundColor: "#4ADE80",
+  },
+  gameModeButtonText: {
+    fontWeight: "900",
+    fontSize: 14,
+    color: "#000",
+  },
+  // Coin Marker Style
+  coinMarker: {
+    backgroundColor: "#FEF08A",
+    borderWidth: 2,
+    borderColor: "#000",
+    borderRadius: 20,
+    padding: 4,
+    alignItems: "center",
+    justifyContent: "center",
+  },
+  coinText: {
+    fontSize: 18,
+  },
+  // Modal Pop Up Styles
+  modalOverlay: {
+    flex: 1,
+    backgroundColor: "rgba(0,0,0,0.5)",
+    justifyContent: "center",
+    alignItems: "center",
+    padding: 20,
+  },
+  modalContent: {
+    width: "100%",
+    backgroundColor: "#FFFDF9",
+    borderWidth: 4,
+    borderColor: "#000",
+    padding: 20,
+    shadowColor: "#000",
+    shadowOffset: { width: 6, height: 6 },
+    shadowOpacity: 1,
+    shadowRadius: 0,
+    elevation: 8,
+  },
+  modalTitle: {
+    fontSize: 20,
+    fontWeight: "900",
+    marginBottom: 8,
+    textAlign: "center",
+  },
+  modalSubtitle: {
+    fontSize: 14,
+    fontWeight: "600",
+    color: "#555",
+    marginBottom: 20,
+    textAlign: "center",
+  },
+  routeOptionButton: {
+    backgroundColor: "#FEF08A",
+    borderWidth: 3,
+    borderColor: "#000",
+    paddingVertical: 12,
+    alignItems: "center",
+    marginBottom: 12,
+    shadowColor: "#000",
+    shadowOffset: { width: 3, height: 3 },
+    shadowOpacity: 1,
+    shadowRadius: 0,
+  },
+  routeOptionText: {
+    fontSize: 16,
+    fontWeight: "900",
+    color: "#000",
+  },
+  closeModalButton: {
+    backgroundColor: "#E5E7EB",
+    borderWidth: 3,
+    borderColor: "#000",
+    paddingVertical: 10,
+    alignItems: "center",
+    marginTop: 10,
+  },
+  closeModalText: {
+    fontSize: 14,
+    fontWeight: "900",
+    color: "#000",
+  },
+  // Stats Card Styles
   statsCard: {
     position: "absolute",
     bottom: 30,
