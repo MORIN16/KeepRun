@@ -30,6 +30,7 @@ export default function SettingsScreen() {
   const [targetKm, setTargetKm] = useState<number>(2);
   const [isCustomMode, setIsCustomMode] = useState<boolean>(false);
   const [customKmInput, setCustomKmInput] = useState<string>("");
+  const [targetKcal, setTargetKcal] = useState<string>("110");
   const [saving, setSaving] = useState<boolean>(false);
 
   useEffect(() => {
@@ -47,6 +48,7 @@ export default function SettingsScreen() {
           setWeight(data.weight ? String(data.weight) : "");
           setHeight(data.height ? String(data.height) : "");
           setTargetKm(data.targetKm || 2);
+          setTargetKcal(data.targetKcal ? String(data.targetKcal) : "110");
         }
       } catch (err) {
         console.error("Gagal memuat data settings:", err);
@@ -67,6 +69,7 @@ export default function SettingsScreen() {
         weight: weight,
         height: height,
         targetKm: targetKm,
+        targetKcal: parseFloat(targetKcal) || 110,
       });
 
       Alert.alert("Sukses", "Pengaturan profil & target berhasil disimpan!");
@@ -159,6 +162,15 @@ export default function SettingsScreen() {
           </View>
         </View>
       </View>
+
+      <Text style={styles.label}>Target Kalori Harian (Kcal)</Text>
+      <TextInput
+        style={styles.input}
+        value={targetKcal}
+        onChangeText={setTargetKcal}
+        keyboardType="numeric"
+        placeholder="110"
+      />
 
       {/* Target KM Box */}
       <View style={styles.card}>

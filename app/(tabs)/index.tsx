@@ -6,12 +6,11 @@ import {
   doc, // Tambahkan ini untuk TypeScript
   DocumentData, // Tambahkan ini untuk TypeScript
   FirestoreError,
-  getDoc,
   onSnapshot,
   query, // Tambahkan ini untuk TypeScript
   QueryDocumentSnapshot, // Tambahkan ini
   QuerySnapshot,
-  where,
+  where
 } from "firebase/firestore";
 import React, { useEffect, useState } from "react";
 import {
@@ -66,6 +65,7 @@ export default function HomeScreen() {
   const [todayKcal, setTodayKcal] = useState<number>(0);
   const [latestSessionKm, setLatestSessionKm] = useState<number>(0);
   const [totalSessionsCount, setTotalSessionsCount] = useState<number>(0);
+  const [userTargetKcal, setUserTargetKcal] = useState<number>(110);
 
   // Streak States
   const [streakCount, setStreakCount] = useState(0);
@@ -78,32 +78,28 @@ export default function HomeScreen() {
     const user = auth.currentUser;
     if (!user) return;
 
-    // 1. Fetch data profil user
-    const fetchUserProfile = async () => {
-      try {
-        const userDocRef = doc(db, "users", user.uid);
-        const userDocSnap = await getDoc(userDocRef);
-        if (userDocSnap.exists()) {
-          const userData = userDocSnap.data();
-          const name = userData.username || "Runner";
-          const target = Number(userData.targetKm) || 2;
-          setUsername(name);
-          setUserTargetKm(target);
-          setInitials(
-            name
-              .split(" ")
-              .map((n: string) => n[0])
-              .join("")
-              .substring(0, 2)
-              .toUpperCase() || "RN",
-          );
-        }
-      } catch (err) {
-        console.error("Gagal memuat profil:", err);
-      }
-    };
+    // 1. Realtime listener untuk data profil user
+    const userDocRef = doc(db, "users", user.uid);
+    const unsubscribeUser = onSnapshot(userDocRef, (userDocSnap) => {
+      if (userDocSnap.exists()) {
+        const userData = userDocSnap.data();
+        const name = userData.username || "Runner";
+        const target = Number(userData.targetKm) || 2;
+        const targetKcal = Number(userData.targetKcal) || 110;
 
-    fetchUserProfile();
+        setUsername(name);
+        setUserTargetKm(target);
+        setUserTargetKcal(targetKcal);
+        setInitials(
+          name
+            .split(" ")
+            .map((n: string) => n[0])
+            .join("")
+            .substring(0, 2)
+            .toUpperCase() || "RN",
+        );
+      }
+    });
 
     // 2. Realtime listener untuk dokumen lari (Runs)
     const q = query(collection(db, "runs"), where("userId", "==", user.uid));
@@ -231,7 +227,7 @@ export default function HomeScreen() {
       },
     );
 
-    return () => unsubscribe();
+    return () => unsubscribeUser();
   }, [userTargetKm]);
 
   const handleShareStreak = async () => {
@@ -345,7 +341,7 @@ export default function HomeScreen() {
           <View style={styles.heroStats}>
             <Text style={styles.statLabel}>Move</Text>
             <Text style={[styles.statValue, { color: theme.primary }]}>
-              {todayKcal}/110 KCAL
+              {todayKcal}/{userTargetKcal} KCAL
             </Text>
           </View>
         </View>

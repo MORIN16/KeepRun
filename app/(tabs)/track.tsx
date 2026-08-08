@@ -1,7 +1,22 @@
 import Colors from "@/constants/Colors";
 import { auth, db } from "@/firebaseConfig";
 import * as Location from "expo-location";
-import { addDoc, collection, serverTimestamp } from "firebase/firestore";
+import {
+  addDoc,
+  collection,
+  doc,
+  DocumentData,
+  getDoc,
+  getDocs,
+  limit,
+  onSnapshot,
+  orderBy,
+  query,
+  QueryDocumentSnapshot,
+  QuerySnapshot,
+  serverTimestamp,
+  where,
+} from "firebase/firestore";
 import React, { useEffect, useRef, useState } from "react";
 import {
   Alert,
@@ -13,7 +28,12 @@ import {
   TouchableOpacity,
   View,
 } from "react-native";
-import MapView, { Marker, Polyline, PROVIDER_GOOGLE } from "react-native-maps";
+import MapView, {
+  MapPressEvent,
+  Marker,
+  Polyline,
+  PROVIDER_GOOGLE,
+} from "react-native-maps";
 
 interface Coordinate {
   latitude: number;
@@ -26,22 +46,49 @@ interface CoinCheckpoint {
   isCollected: boolean;
 }
 
+interface SavedRoute {
+  id: string;
+  name: string;
+  distanceKm: number;
+  coordinates: Coordinate[];
+  usageCount: number;
+}
+
+interface RunSession {
+  id: string;
+  userId: string;
+  distance: number;
+  duration: number;
+  date?: string;
+  createdAt?: any;
+}
+
 export default function TrackRunScreen() {
   const theme = Colors.light;
+  const user = auth.currentUser;
+  const [runs, setRuns] = useState<RunSession[]>([]);
 
-  // States
+  // States Utama Track
   const [location, setLocation] = useState<Location.LocationObject | null>(
     null,
   );
   const [routeCoordinates, setRouteCoordinates] = useState<Coordinate[]>([]);
   const [isTracking, setIsTracking] = useState<boolean>(false);
+  const [userWeight, setUserWeight] = useState<number>(65);
   const [isPaused, setIsPaused] = useState<boolean>(false);
-  const [distance, setDistance] = useState<number>(0); // Dalam kilometer
-  const [duration, setDuration] = useState<number>(0); // Dalam detik
+  const [distance, setDistance] = useState<number>(0);
+  const [duration, setDuration] = useState<number>(0);
+  const [isFinishModalVisible, setIsFinishModalVisible] =
+    useState<boolean>(false);
 
-  // Game Mode States
+  // States Game Mode & Custom Route Creator
   const [isGameModeActive, setIsGameModeActive] = useState<boolean>(false);
   const [isModalVisible, setIsModalVisible] = useState<boolean>(false);
+  const [isCreatingRoute, setIsCreatingRoute] = useState<boolean>(false);
+  const [customWaypoints, setCustomWaypoints] = useState<Coordinate[]>([]);
+  const [savedRoutes, setSavedRoutes] = useState<SavedRoute[]>([]);
+
+  // Game States
   const [gameRoute, setGameRoute] = useState<Coordinate[]>([]);
   const [coins, setCoins] = useState<CoinCheckpoint[]>([]);
   const [score, setScore] = useState<number>(0);
@@ -50,7 +97,6 @@ export default function TrackRunScreen() {
   const locationSubscription = useRef<Location.LocationSubscription | null>(
     null,
   );
-  // const timerRef = useRef<NodeJS.Timeout | ReturnType<typeof setInterval> | OnErrorEventHandlerNonNull>(null);
   const timerRef = useRef<
     NodeJS.Timeout | ReturnType<typeof setInterval> | null
   >(null);
@@ -58,184 +104,265 @@ export default function TrackRunScreen() {
   const coinsRef = useRef<CoinCheckpoint[]>([]);
   coinsRef.current = coins;
 
-  // 1. Request Izin & Dapatkan Lokasi Awal
+  useEffect(() => {
+    if (!user?.uid) return;
+
+    const q = query(
+      collection(db, "runs"),
+      where("userId", "==", user.uid),
+      orderBy("createdAt", "desc"),
+    );
+
+    const unsubscribe = onSnapshot(
+      q,
+      (querySnapshot: QuerySnapshot<DocumentData>) => {
+        const runsData: RunSession[] = [];
+
+        querySnapshot.forEach(
+          (docSnap: QueryDocumentSnapshot<DocumentData>) => {
+            const data = docSnap.data();
+            runsData.push({
+              id: docSnap.id,
+              userId: data.userId,
+              distance: data.distanceKm || data.distance || 0,
+              duration: data.durationSeconds || data.duration || 0,
+              date: data.createdAt?.toDate?.()?.toISOString() || "",
+              createdAt: data.createdAt,
+            });
+          },
+        );
+
+        setRuns(runsData);
+      },
+      (error) => {
+        console.error("Error fetching real-time runs: ", error);
+      },
+    );
+
+    return () => unsubscribe();
+  }, [user?.uid]);
+
+  // 1. Inisialisasi Lokasi
   useEffect(() => {
     (async () => {
       let { status } = await Location.requestForegroundPermissionsAsync();
       if (status !== "granted") {
-        Alert.alert(
-          "Izin Ditolak",
-          "Izin lokasi diperlukan untuk melacak lari!",
-        );
+        Alert.alert("Izin Ditolak", "Izin lokasi diperlukan!");
         return;
       }
-
       let currentLoc = await Location.getCurrentPositionAsync({
         accuracy: Location.Accuracy.High,
       });
       setLocation(currentLoc);
     })();
 
-    return () => {
-      stopLocationUpdates();
-    };
+    return () => stopLocationUpdates();
   }, []);
 
-  // 2. Timer untuk Durasi Lari (Hanya berjalan jika isTracking = true & isPaused = false)
+  // 2. Timer Lari
   useEffect(() => {
     if (isTracking && !isPaused) {
-      timerRef.current = setInterval(() => {
-        setDuration((prev) => prev + 1);
-      }, 1000);
-    } else {
-      if (timerRef.current) {
-        clearInterval(timerRef.current);
-        timerRef.current = null;
-      }
+      timerRef.current = setInterval(
+        () => setDuration((prev) => prev + 1),
+        1000,
+      );
+    } else if (timerRef.current) {
+      clearInterval(timerRef.current);
+      timerRef.current = null;
     }
-
     return () => {
-      if (timerRef.current) {
-        clearInterval(timerRef.current);
-        timerRef.current = null;
-      }
+      if (timerRef.current) clearInterval(timerRef.current);
     };
   }, [isTracking, isPaused]);
 
-  // 3. Formula Haversine (Hitung Jarak Antar 2 Koordinat)
-  const calculateDistance = (newCoord: Coordinate, prevCoord: Coordinate) => {
-    const R = 6371; // Jari-jari bumi dalam km
-    const dLat = ((newCoord.latitude - prevCoord.latitude) * Math.PI) / 180;
-    const dLon = ((newCoord.longitude - prevCoord.longitude) * Math.PI) / 180;
+  // 3. Formula Haversine (Hitung Jarak dalam KM)
+  const calculateDistance = (coord1: Coordinate, coord2: Coordinate) => {
+    const R = 6371;
+    const dLat = ((coord2.latitude - coord1.latitude) * Math.PI) / 180;
+    const dLon = ((coord2.longitude - coord1.longitude) * Math.PI) / 180;
     const a =
       Math.sin(dLat / 2) * Math.sin(dLat / 2) +
-      Math.cos((prevCoord.latitude * Math.PI) / 180) *
-        Math.cos((newCoord.latitude * Math.PI) / 180) *
+      Math.cos((coord1.latitude * Math.PI) / 180) *
+        Math.cos((coord2.latitude * Math.PI) / 180) *
         Math.sin(dLon / 2) *
         Math.sin(dLon / 2);
-    const c = 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
-    return R * c; // Hasil dalam km
+    return R * (2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a)));
   };
 
-  // Helper: Pindah koordinat berdasarkan jarak (meter) & sudut (bearing)
-  const moveCoordinate = (
-    coord: Coordinate,
-    distanceMeters: number,
-    bearingDegrees: number,
-  ) => {
-    const R = 6371000; // Radius bumi dalam meter
-    const d = distanceMeters;
-    const brng = (bearingDegrees * Math.PI) / 180;
-    const lat1 = (coord.latitude * Math.PI) / 180;
-    const lon1 = (coord.longitude * Math.PI) / 180;
-
-    const lat2 = Math.asin(
-      Math.sin(lat1) * Math.cos(d / R) +
-        Math.cos(lat1) * Math.sin(d / R) * Math.cos(brng),
-    );
-    const lon2 =
-      lon1 +
-      Math.atan2(
-        Math.sin(brng) * Math.sin(d / R) * Math.cos(lat1),
-        Math.cos(d / R) - Math.sin(lat1) * Math.sin(lat2),
-      );
-
-    return {
-      latitude: (lat2 * 180) / Math.PI,
-      longitude: (lon2 * 180) / Math.PI,
-    };
+  // 4. Hitung Jarak Kumulatif Suatu Jalur
+  const calculateTotalPathDistance = (path: Coordinate[]): number => {
+    let total = 0;
+    for (let i = 0; i < path.length - 1; i++) {
+      total += calculateDistance(path[i], path[i + 1]);
+    }
+    return total;
   };
 
-  // 4. Generator Rute Game & Koin Checkpoint (Tiap 200 meter)
-  const generateGameRouteAndCoins = (targetDistanceKm: number) => {
-    if (!location) return;
-
-    const start = {
-      latitude: location.coords.latitude,
-      longitude: location.coords.longitude,
-    };
-
-    const newGameRoute: Coordinate[] = [start];
+  // 5. Generator Checkpoint Koin Tiap 200m pada Rute
+  const generateCoinsFromPath = (path: Coordinate[]): CoinCheckpoint[] => {
     const newCoins: CoinCheckpoint[] = [];
-
-    const totalMeters = targetDistanceKm * 1000;
-    const stepMeters = 50; // sampel titik tiap 50m
-    let accumulatedMeters = 0;
+    let accumulatedDistMeters = 0;
+    let nextCoinTargetMeters = 200; // Koin pertama di 200 meter
     let coinCounter = 0;
 
-    let currentCoord = start;
-    let currentBearing = 45; // Arah lintasan awal (derajat)
+    for (let i = 0; i < path.length - 1; i++) {
+      const p1 = path[i];
+      const p2 = path[i + 1];
+      const segmentDistMeters = calculateDistance(p1, p2) * 1000;
 
-    while (accumulatedMeters < totalMeters) {
-      accumulatedMeters += stepMeters;
+      while (
+        accumulatedDistMeters + segmentDistMeters >=
+        nextCoinTargetMeters
+      ) {
+        coinCounter++;
+        // Interpolasi posisi koin di antara p1 dan p2
+        const ratio =
+          (nextCoinTargetMeters - accumulatedDistMeters) / segmentDistMeters;
+        const coinLat = p1.latitude + ratio * (p2.latitude - p1.latitude);
+        const coinLng = p1.longitude + ratio * (p2.longitude - p1.longitude);
 
-      // Sedikit belokan acak agar lintasan menyerupai jalanan
-      if (accumulatedMeters % 300 === 0) {
-        currentBearing += (Math.random() - 0.5) * 60;
-      }
-
-      currentCoord = moveCoordinate(currentCoord, stepMeters, currentBearing);
-      newGameRoute.push(currentCoord);
-
-      // Taruh koin setiap kelipatan 200 meter
-      if (accumulatedMeters % 200 === 0) {
-        coinCounter += 1;
         newCoins.push({
           id: `coin-${coinCounter}`,
-          coordinate: currentCoord,
+          coordinate: { latitude: coinLat, longitude: coinLng },
           isCollected: false,
         });
+
+        nextCoinTargetMeters += 200; // Koin berikutnya 200 meter lagi
       }
+      accumulatedDistMeters += segmentDistMeters;
+    }
+    return newCoins;
+  };
+
+  // 6. Fetch Database Rute yang Sering Digunakan / Disukai Komunitas
+  const fetchCommunityRoutes = async () => {
+    try {
+      const routesRef = collection(db, "game_routes");
+      // Mengambil rute dari database berdasarkan rute populer (paling sering dipakai)
+      const q = query(routesRef, limit(5));
+      const querySnapshot = await getDocs(q);
+
+      const loadedRoutes: SavedRoute[] = [];
+      querySnapshot.forEach((doc) => {
+        const data = doc.data();
+        loadedRoutes.push({
+          id: doc.id,
+          name: data.name || "Rute Komunitas",
+          distanceKm: data.distanceKm,
+          coordinates: data.coordinates,
+          usageCount: data.usageCount || 1,
+        });
+      });
+
+      setSavedRoutes(loadedRoutes);
+    } catch (error) {
+      console.error("Gagal mengambil data rute:", error);
+    }
+  };
+
+  // 7. Handler Tap Map Saat Membuat Rute Sendiri
+  const handleMapPressForCustomRoute = (e: MapPressEvent) => {
+    if (!isCreatingRoute) return;
+    const newCoord = e.nativeEvent.coordinate;
+    setCustomWaypoints((prev) => [...prev, newCoord]);
+  };
+
+  // 8. Simpan Rute Custom buatan User ke Firestore
+  const handleSaveCustomRoute = async () => {
+    if (customWaypoints.length < 2) {
+      Alert.alert(
+        "Rute Terlalu Pendek",
+        "Tambahkan minimal 2 titik lokasi di map!",
+      );
+      return;
     }
 
-    setGameRoute(newGameRoute);
-    setCoins(newCoins);
+    // 1. Ubah titik lurus menjadi rute mulus mengikuti jalan raya
+    const snappedCoordinates = await fetchSnapToRoads(customWaypoints);
+
+    // 2. Hitung jarak total & koin berdasarkan rute presisi jalan
+    const pathDistKm = parseFloat(
+      calculateTotalPathDistance(snappedCoordinates).toFixed(2),
+    );
+    const generatedCoins = generateCoinsFromPath(snappedCoordinates);
+
+    try {
+      // Simpan ke Firestore agar menjadi data rute sistem tanpa input manual lagi
+      await addDoc(collection(db, "game_routes"), {
+        name: `Rute Custom ${pathDistKm} KM`,
+        distanceKm: pathDistKm,
+        coordinates: snappedCoordinates,
+        usageCount: 1,
+        createdAt: serverTimestamp(),
+      });
+      setGameRoute(snappedCoordinates);
+      setCoins(generatedCoins);
+      setIsGameModeActive(true);
+      setIsCreatingRoute(false);
+      setCustomWaypoints([]);
+      setScore(0);
+
+      Alert.alert(
+        "Rute Berhasil Disimpan! 🎮",
+        `Rute (${pathDistKm} KM) telah disimpan ke sistem dan ${generatedCoins.length} koin siap dikumpulkan!`,
+      );
+    } catch (error) {
+      Alert.alert("Error", "Gagal menyimpan rute ke server.");
+    }
+  };
+
+  // 9. Pilih Rute Komunitas dari Pop-up
+  const selectCommunityRoute = (selectedRoute: SavedRoute) => {
+    const generatedCoins = generateCoinsFromPath(selectedRoute.coordinates);
+    setGameRoute(selectedRoute.coordinates);
+    setCoins(generatedCoins);
     setIsGameModeActive(true);
-    setScore(0);
     setIsModalVisible(false);
+    setScore(0);
 
     Alert.alert(
-      "Game Mode On! 🎮",
-      `Rute ${targetDistanceKm} KM telah dibuat dengan ${newCoins.length} koin pacman. Ayo kumpulkan semua koin!`,
+      "Game Mode Ready! 🎮",
+      `Menggunakan "${selectedRoute.name}". Ada ${generatedCoins.length} koin untuk dikumpulkan!`,
     );
   };
 
-  // 5. Cek Koin yang Dimakan (Pac-Man Logic)
+  // 10. Cek Koin Terambil oleh User
   const checkCoinCollection = (userCoord: Coordinate) => {
-    let updatedScore = 0;
+    const currentCoins = coinsRef.current;
+
+    // Cari indeks koin pertama yang BELUM diambil
+    const nextCoinIndex = currentCoins.findIndex((c) => !c.isCollected);
+
+    // Jika semua koin sudah diambil, keluar dari fungsi
+    if (nextCoinIndex === -1) return;
+
     let isAnyCollected = false;
+    const updatedCoins = [...currentCoins];
 
-    const newCoins = coinsRef.current.map((coin) => {
+    const candidateIndices = [nextCoinIndex, nextCoinIndex + 1].filter(
+      (idx) => idx < updatedCoins.length,
+    );
+
+    candidateIndices.forEach((idx) => {
+      const coin = updatedCoins[idx];
       if (!coin.isCollected) {
-        const distKm = calculateDistance(userCoord, coin.coordinate);
-        const distMeters = distKm * 1000;
-
-        // Jika jarak user ke koin < 5 meter, anggap koin termakan!
+        const distMeters = calculateDistance(userCoord, coin.coordinate) * 1000;
+        // Toleransi radius 5 meter dari lokasi user
         if (distMeters <= 5) {
+          updatedCoins[idx] = { ...coin, isCollected: true };
           isAnyCollected = true;
-          return { ...coin, isCollected: true };
         }
       }
-      return coin;
     });
 
     if (isAnyCollected) {
-      // Hitung skor baru
-      const collectedCount = newCoins.filter((c) => c.isCollected).length;
+      const collectedCount = updatedCoins.filter((c) => c.isCollected).length;
       setScore(collectedCount * 10);
-      setCoins(newCoins);
+      setCoins(updatedCoins);
     }
   };
 
-  // 6. Stop Listening ke Sensor GPS
-  const stopLocationUpdates = () => {
-    if (locationSubscription.current) {
-      locationSubscription.current.remove();
-      locationSubscription.current = null;
-    }
-  };
-
-  // 7. Start / Resume Tracking
+  // 11. GPS Tracking Loop
   const startTracking = async () => {
     setIsTracking(true);
     setIsPaused(false);
@@ -243,121 +370,240 @@ export default function TrackRunScreen() {
     locationSubscription.current = await Location.watchPositionAsync(
       {
         accuracy: Location.Accuracy.BestForNavigation,
-        timeInterval: 2000, // Sync tiap 2 detik
-        distanceInterval: 5, // Filter: hanya abaikan jika pergerakan < 5 meter
+        timeInterval: 2000,
+        distanceInterval: 5,
       },
       (newLocation) => {
-        // [FIX GPS DRIFT 1]: Abaikan jika akurasi lokasi sangat buruk (> 15 meter error)
-        if (newLocation.coords.accuracy && newLocation.coords.accuracy > 15) {
+        if (newLocation.coords.accuracy && newLocation.coords.accuracy > 15)
           return;
-        }
 
         const { latitude, longitude } = newLocation.coords;
         const newCoord = { latitude, longitude };
-
         setLocation(newLocation);
 
-        setRouteCoordinates((prevCoords) => {
-          if (prevCoords.length > 0) {
-            const lastCoord = prevCoords[prevCoords.length - 1];
-            const addedDistance = calculateDistance(newCoord, lastCoord);
-
-            // [FIX GPS DRIFT 2]: Filter GPS Noise saat diam
-            // Abaikan penambahan jarak jika perpindahan di bawah 5 meter (0.005 km)
-            if (addedDistance < 0.005) {
-              return prevCoords;
-            }
-
-            setDistance((prevDist) => prevDist + addedDistance);
+        setRouteCoordinates((prev) => {
+          if (prev.length > 0) {
+            const addedDist = calculateDistance(
+              newCoord,
+              prev[prev.length - 1],
+            );
+            if (addedDist >= 0.005) setDistance((d) => d + addedDist);
           }
-          return [...prevCoords, newCoord];
+          return [...prev, newCoord];
         });
 
-        if (isGameModeActive) {
-          checkCoinCollection(newCoord);
-        }
+        if (isGameModeActive) checkCoinCollection(newCoord);
 
-        // Focus kamera ke lokasi terbaru
-        mapRef.current?.animateCamera({
-          center: newCoord,
-          zoom: 17,
-        });
+        mapRef.current?.animateCamera({ center: newCoord, zoom: 17 });
       },
     );
   };
 
-  // 8. Pause Tracking
+  useEffect(() => {
+    const fetchUserProfile = async () => {
+      const currentUser = auth.currentUser;
+      if (!currentUser) return;
+
+      try {
+        const userDocRef = doc(db, "users", currentUser.uid);
+        const userDocSnap = await getDoc(userDocRef);
+        if (userDocSnap.exists()) {
+          const data = userDocSnap.data();
+          if (data.weight) {
+            setUserWeight(parseFloat(data.weight) || 65);
+          }
+        }
+      } catch (error) {
+        console.error("Gagal memuat data profil untuk track:", error);
+      }
+    };
+
+    fetchUserProfile();
+  }, []);
+
+  const calculatePace = (distKm: number, durationSec: number): string => {
+    if (distKm <= 0 || durationSec <= 0) return "0'00\"";
+
+    const paceDecimal = durationSec / 60 / distKm; // dalam menit per km
+    const paceMins = Math.floor(paceDecimal);
+    const paceSecs = Math.round((paceDecimal - paceMins) * 60);
+
+    // Format tampilan misal: 5'30"
+    return `${paceMins}'${paceSecs.toString().padStart(2, "0")}"`;
+  };
+
+  // Hitung Estimasi Kalori Terbakar
+  const calculateCalories = (distKm: number): number => {
+    return Math.round(distKm * userWeight * 1.036);
+  };
+
+  const stopLocationUpdates = () => {
+    if (locationSubscription.current) {
+      locationSubscription.current.remove();
+      locationSubscription.current = null;
+    }
+  };
+
   const pauseTracking = () => {
     setIsPaused(true);
-    stopLocationUpdates(); // Matikan sensor GPS saat di-pause agar hemat baterai
+    stopLocationUpdates();
   };
 
-  // 9. Resume Tracking
-  const resumeTracking = () => {
-    startTracking();
-  };
-
-  // 10. Finish / Save Run
   const handleFinishRun = () => {
-    Alert.alert(
-      "Selesai Lari?",
-      `Total Jarak: ${distance.toFixed(2)} KM\nDurasi: ${formatTime(duration)}`,
-      [
-        { text: "Batal", style: "cancel" },
-        {
-          text: "Simpan & Selesai",
-          style: "destructive",
-          onPress: async () => {
-            try {
-              const user = auth.currentUser;
-              if (!user) {
-                Alert.alert("Error", "Harus login terlebih dahulu!");
-                return;
-              }
-
-              // Simpan data lari lengkap dengan userId milik user yang sedang aktif
-              await addDoc(collection(db, "runs"), {
-                userId: user.uid, // <-- Dapatkan ID User aktif
-                distanceKm: parseFloat(distance.toFixed(2)),
-                durationSeconds: duration,
-                routeCoordinates: routeCoordinates,
-                score: isGameModeActive ? score : 0,
-                isGameMode: isGameModeActive,
-                createdAt: serverTimestamp(),
-              });
-
-              Alert.alert("Sukses", "Sesi lari berhasil disimpan!");
-            } catch (error) {
-              console.error("Gagal menyimpan data lari:", error);
-              Alert.alert("Error", "Gagal menyimpan data lari.");
-            } finally {
-              stopLocationUpdates();
-              setIsTracking(false);
-              setIsPaused(false);
-              setRouteCoordinates([]);
-              setGameRoute([]);
-              setCoins([]);
-              setIsGameModeActive(false);
-              setScore(0);
-              setDistance(0);
-              setDuration(0);
-            }
-          },
-        },
-      ],
-    );
+    // Alert.alert("Selesai Lari?", `Total Jarak: ${distance.toFixed(2)} KM`, [
+    //   { text: "Batal", style: "cancel" },
+    //   {
+    //     text: "Simpan & Selesai",
+    //     onPress: async () => {
+    //       try {
+    //         const currentUser = auth.currentUser;
+    //         if (currentUser) {
+    //           // Simpan riwayat lari ke koleksi 'runs'
+    //           await addDoc(collection(db, "runs"), {
+    //             userId: currentUser.uid,
+    //             distanceKm: parseFloat(distance.toFixed(2)),
+    //             durationSeconds: duration,
+    //             score: isGameModeActive ? score : 0,
+    //             coordinates: routeCoordinates,
+    //             createdAt: serverTimestamp(),
+    //           });
+    //         }
+    //       } catch (error) {
+    //         console.error("Gagal menyimpan data lari:", error);
+    //       } finally {
+    //         stopLocationUpdates();
+    //         setIsTracking(false);
+    //         setIsPaused(false);
+    //         setRouteCoordinates([]);
+    //         setGameRoute([]);
+    //         setCoins([]);
+    //         setIsGameModeActive(false);
+    //         setDistance(0);
+    //         setDuration(0);
+    //       }
+    //     },
+    //   },
+    // ]);
+    setIsFinishModalVisible(true);
   };
 
-  // Format Timer (MM:SS)
+  const confirmFinishRun = async () => {
+    try {
+      const currentUser = auth.currentUser;
+      if (currentUser) {
+        const avgPace = calculatePace(distance, duration);
+        const caloriesBurned = calculateCalories(distance);
+
+        await addDoc(collection(db, "runs"), {
+          userId: currentUser.uid,
+          distanceKm: parseFloat(distance.toFixed(2)),
+          durationSeconds: duration,
+          pace: avgPace,
+          calories: caloriesBurned,
+          score: isGameModeActive ? score : 0,
+          isGameMode: isGameModeActive,
+          coordinates: routeCoordinates,
+          createdAt: serverTimestamp(),
+        });
+      }
+    } catch (error) {
+      console.error("Gagal menyimpan data lari:", error);
+    } finally {
+      setIsFinishModalVisible(false);
+      stopLocationUpdates();
+      setIsTracking(false);
+      setIsPaused(false);
+      setRouteCoordinates([]);
+      setGameRoute([]);
+      setCoins([]);
+      setIsGameModeActive(false);
+      setDistance(0);
+      setDuration(0);
+    }
+  };
+
   const formatTime = (sec: number) => {
     const mins = Math.floor(sec / 60);
     const secs = sec % 60;
     return `${mins.toString().padStart(2, "0")}:${secs.toString().padStart(2, "0")}`;
   };
 
+  // Helper untuk mengurai string polyline terkompresi dari Google
+  const decodePolyline = (encoded: string): Coordinate[] => {
+    let points: Coordinate[] = [];
+    let index = 0,
+      len = encoded.length;
+    let lat = 0,
+      lng = 0;
+
+    while (index < len) {
+      let b,
+        shift = 0,
+        result = 0;
+      do {
+        b = encoded.charCodeAt(index++) - 63;
+        result |= (b & 0x1f) << shift;
+        shift += 5;
+      } while (b >= 0x20);
+      let dlat = result & 1 ? ~(result >> 1) : result >> 1;
+      lat += dlat;
+
+      shift = 0;
+      result = 0;
+      do {
+        b = encoded.charCodeAt(index++) - 63;
+        result |= (b & 0x1f) << shift;
+        shift += 5;
+      } while (b >= 0x20);
+      let dlng = result & 1 ? ~(result >> 1) : result >> 1;
+      lng += dlng;
+
+      points.push({
+        latitude: lat / 1e5,
+        longitude: lng / 1e5,
+      });
+    }
+    return points;
+  };
+
+  // Fungsi Fetch Rute Mengikuti Jalan
+  const fetchSnapToRoads = async (
+    waypoints: Coordinate[],
+  ): Promise<Coordinate[]> => {
+    if (waypoints.length < 2) return waypoints;
+
+    const apiKey = "AIzaSyCM8vxXYq31Wue1WQ6W7tzpDGCSm9Vxn14";
+    const origin = `${waypoints[0].latitude},${waypoints[0].longitude}`;
+    const destination = `${waypoints[waypoints.length - 1].latitude},${waypoints[waypoints.length - 1].longitude}`;
+
+    // Waypoints perantara jika user menatap lebih dari 2 titik
+    let waypointsParam = "";
+    if (waypoints.length > 2) {
+      const intermediates = waypoints
+        .slice(1, -1)
+        .map((pt) => `${pt.latitude},${pt.longitude}`)
+        .join("|");
+      waypointsParam = `&waypoints=${intermediates}`;
+    }
+
+    const url = `https://maps.googleapis.com/maps/api/directions/json?origin=${origin}&destination=${destination}${waypointsParam}&mode=walking&key=${apiKey}`;
+
+    try {
+      const response = await fetch(url);
+      const data = await response.json();
+
+      if (data.status === "OK" && data.routes.length > 0) {
+        return decodePolyline(data.routes[0].overview_polyline.points);
+      }
+    } catch (error) {
+      console.error("Gagal melakukan Snap to Roads:", error);
+    }
+
+    return waypoints; // Fallback ke waypoints asli jika request gagal
+  };
+
   return (
     <View style={styles.container}>
-      {/* MAP VIEW SECTION */}
       {location ? (
         <MapView
           ref={mapRef}
@@ -370,8 +616,10 @@ export default function TrackRunScreen() {
             longitudeDelta: 0.005,
           }}
           showsUserLocation={true}
-          followsUserLocation={true}
+          followsUserLocation={!isCreatingRoute}
+          onPress={handleMapPressForCustomRoute}
         >
+          {/* Rute Game Terpilih (Kuning Putus-putus) */}
           {isGameModeActive && gameRoute.length > 0 && (
             <Polyline
               coordinates={gameRoute}
@@ -381,7 +629,7 @@ export default function TrackRunScreen() {
             />
           )}
 
-          {/* Garis Rute Lari */}
+          {/* Rute Lari Nyata User (Hijau) */}
           {routeCoordinates.length > 0 && (
             <Polyline
               coordinates={routeCoordinates}
@@ -390,12 +638,26 @@ export default function TrackRunScreen() {
             />
           )}
 
-          {/* Marker Start Point */}
-          {routeCoordinates.length > 0 && (
-            <Marker coordinate={routeCoordinates[0]} title="Start Point" />
+          {/* Rute yang Sedang Digambar oleh User (Biru) */}
+          {isCreatingRoute && customWaypoints.length > 0 && (
+            <>
+              <Polyline
+                coordinates={customWaypoints}
+                strokeColor="#3B82F6"
+                strokeWidth={5}
+              />
+              {customWaypoints.map((pt, idx) => (
+                <Marker
+                  key={idx}
+                  coordinate={pt}
+                  pinColor="blue"
+                  title={`Titik ${idx + 1}`}
+                />
+              ))}
+            </>
           )}
 
-          {/* Marker Koin Checkpoints */}
+          {/* Marker Checkpoint Koin */}
           {isGameModeActive &&
             coins.map(
               (coin) =>
@@ -403,7 +665,6 @@ export default function TrackRunScreen() {
                   <Marker
                     key={coin.id}
                     coordinate={coin.coordinate}
-                    title="Coin (+10 pts)"
                     anchor={{ x: 0.5, y: 0.5 }}
                   >
                     <View style={styles.coinMarker}>
@@ -419,58 +680,165 @@ export default function TrackRunScreen() {
         </View>
       )}
 
-      <TouchableOpacity
-        style={[
-          styles.gameModeButton,
-          isGameModeActive && styles.gameModeButtonActive,
-        ]}
-        onPress={() => setIsModalVisible(true)}
-      >
-        <Text style={styles.gameModeButtonText}>
-          {isGameModeActive ? `🎮 ${score} PTS` : "🎮 GAME MODE"}
-        </Text>
-      </TouchableOpacity>
+      {/* BANNER / PANEL SAAT BUAT RUTE CUSTOM */}
+      {isCreatingRoute && (
+        <View style={styles.createRouteBanner}>
+          <Text style={styles.bannerTitle}>📍 Mode Buat Rute Custom</Text>
+          <Text style={styles.bannerSubtitle}>
+            Ketuk pada peta untuk membuat titik rute ({customWaypoints.length}{" "}
+            titik)
+          </Text>
 
-      <Modal
-        visible={isModalVisible}
-        transparent={true}
-        animationType="slide"
-        onRequestClose={() => setIsModalVisible(false)}
-      >
+          <View style={styles.bannerButtonRow}>
+            <TouchableOpacity
+              style={[styles.bannerBtn, { backgroundColor: "#EF4444" }]}
+              onPress={() => {
+                setIsCreatingRoute(false);
+                setCustomWaypoints([]);
+              }}
+            >
+              <Text style={styles.bannerBtnText}>Batal</Text>
+            </TouchableOpacity>
+
+            <TouchableOpacity
+              style={[styles.bannerBtn, { backgroundColor: "#3B82F6" }]}
+              onPress={() => setCustomWaypoints((prev) => prev.slice(0, -1))}
+            >
+              <Text style={styles.bannerBtnText}>Undo</Text>
+            </TouchableOpacity>
+
+            <TouchableOpacity
+              style={[styles.bannerBtn, { backgroundColor: "#10B981" }]}
+              onPress={handleSaveCustomRoute}
+            >
+              <Text style={styles.bannerBtnText}>Simpan & Main</Text>
+            </TouchableOpacity>
+          </View>
+        </View>
+      )}
+
+      {/* TOMBOL GAME MODE DI POJOK KANAN ATAS */}
+      {!isCreatingRoute && (
+        <TouchableOpacity
+          style={[
+            styles.gameModeButton,
+            isGameModeActive && styles.gameModeButtonActive,
+          ]}
+          onPress={() => {
+            fetchCommunityRoutes();
+            setIsModalVisible(true);
+          }}
+        >
+          <Text style={styles.gameModeButtonText}>
+            {isGameModeActive ? `🎮 ${score} PTS` : "🎮 GAME MODE"}
+          </Text>
+        </TouchableOpacity>
+      )}
+
+      {/* MODAL SELEKSI RUTE */}
+      <Modal visible={isModalVisible} transparent={true} animationType="slide">
         <View style={styles.modalOverlay}>
           <View style={styles.modalContent}>
-            <Text style={styles.modalTitle}>🎮 PILIH RUTE GAME</Text>
+            <Text style={styles.modalTitle}>🎮 POPULER & CUSTOM ROUTE</Text>
             <Text style={styles.modalSubtitle}>
-              Kumpulkan koin 🪙 setiap 200 meter sepanjang rute pilihanmu!
+              Pilih rute rekomendasi atau buat rutemu sendiri!
             </Text>
 
+            {/* Opsi 1: Buat Rute Custom */}
             <Pressable
-              style={styles.routeOptionButton}
-              onPress={() => generateGameRouteAndCoins(1)}
+              style={styles.createOptionBtn}
+              onPress={() => {
+                setIsModalVisible(false);
+                setIsCreatingRoute(true);
+                setCustomWaypoints([]);
+              }}
             >
-              <Text style={styles.routeOptionText}>🏃‍♂️ Rute 1 KM (5 Koin)</Text>
+              <Text style={styles.createOptionText}>
+                ✨ Buat Rute Sendiri di Map
+              </Text>
             </Pressable>
 
-            <Pressable
-              style={styles.routeOptionButton}
-              onPress={() => generateGameRouteAndCoins(2)}
-            >
-              <Text style={styles.routeOptionText}>🏃‍♂️ Rute 2 KM (10 Koin)</Text>
-            </Pressable>
+            <Text style={styles.sectionHeader}>Rute Komunitas Terpopuler:</Text>
 
-            <Pressable
-              style={styles.routeOptionButton}
-              onPress={() => generateGameRouteAndCoins(5)}
-            >
-              <Text style={styles.routeOptionText}>🏃‍♂️ Rute 5 KM (25 Koin)</Text>
-            </Pressable>
+            {/* Opsi 2: List Rute Komunitas yang Terdaftar di Firestore */}
+            {savedRoutes.length > 0 ? (
+              savedRoutes.map((item) => (
+                <Pressable
+                  key={item.id}
+                  style={styles.routeOptionButton}
+                  onPress={() => selectCommunityRoute(item)}
+                >
+                  <Text style={styles.routeOptionText}>
+                    📍 {item.name} ({item.distanceKm} KM)
+                  </Text>
+                </Pressable>
+              ))
+            ) : (
+              <Text style={styles.emptyText}>
+                Belum ada rute komunitas tersimpan.
+              </Text>
+            )}
 
             <Pressable
               style={styles.closeModalButton}
               onPress={() => setIsModalVisible(false)}
             >
-              <Text style={styles.closeModalText}>BATAL</Text>
+              <Text style={styles.closeModalText}>TUTUP</Text>
             </Pressable>
+          </View>
+        </View>
+      </Modal>
+
+      <Modal
+        visible={isFinishModalVisible}
+        transparent={true}
+        animationType="fade"
+        onRequestClose={() => setIsFinishModalVisible(false)}
+      >
+        <View style={styles.modalOverlay}>
+          <View style={styles.finishModalCard}>
+            <Text style={styles.finishModalTitle}>🏁 SELESAI LARI?</Text>
+
+            <View style={styles.finishStatsBox}>
+              <Text style={styles.finishStatText}>
+                Total Jarak:{" "}
+                <Text style={styles.finishStatHighlight}>
+                  {distance.toFixed(2)} KM
+                </Text>
+              </Text>
+              <Text style={styles.finishStatText}>
+                Waktu:{" "}
+                <Text style={styles.finishStatHighlight}>
+                  {formatTime(duration)}
+                </Text>
+              </Text>
+              {isGameModeActive && (
+                <Text style={styles.finishStatText}>
+                  Skor Game:{" "}
+                  <Text style={styles.finishStatHighlight}>{score} PTS</Text>
+                </Text>
+              )}
+            </View>
+
+            <Text style={styles.finishModalSub}>
+              Apakah kamu yakin ingin mengakhiri dan menyimpan sesi lari ini?
+            </Text>
+
+            <View style={styles.finishButtonRow}>
+              <Pressable
+                style={[styles.retroFinishBtn, { backgroundColor: "#E5E7EB" }]}
+                onPress={() => setIsFinishModalVisible(false)}
+              >
+                <Text style={styles.retroFinishBtnText}>BATAL</Text>
+              </Pressable>
+
+              <Pressable
+                style={[styles.retroFinishBtn, { backgroundColor: "#4ADE80" }]}
+                onPress={confirmFinishRun}
+              >
+                <Text style={styles.retroFinishBtnText}>SIMPAN & SELESAI</Text>
+              </Pressable>
+            </View>
           </View>
         </View>
       </Modal>
@@ -484,6 +852,13 @@ export default function TrackRunScreen() {
             <Text style={styles.metricLabel}>DISTANCE</Text>
             <Text style={styles.metricValue}>
               {distance.toFixed(2)} <Text style={styles.unit}>KM</Text>
+            </Text>
+          </View>
+
+          <View style={styles.metricItem}>
+            <Text style={styles.metricLabel}>PACE</Text>
+            <Text style={styles.metricValue}>
+              {calculatePace(distance, duration)}
             </Text>
           </View>
 
@@ -503,7 +878,6 @@ export default function TrackRunScreen() {
         {/* BUTTON CONTROLS */}
         <View style={styles.buttonRow}>
           {!isTracking ? (
-            /* STATE 1: BUMPER AWAL (Belum Mulai Lari) */
             <Pressable
               style={({ pressed }) => [
                 styles.retroButton,
@@ -517,12 +891,11 @@ export default function TrackRunScreen() {
               <Text style={styles.buttonText}>START RUN</Text>
             </Pressable>
           ) : !isPaused ? (
-            /* STATE 2: SEDANG LARI (Aktif Tracking) */
             <Pressable
               style={({ pressed }) => [
                 styles.retroButton,
                 {
-                  backgroundColor: "#F87171", // Merah
+                  backgroundColor: "#F87171",
                   transform: [{ translateY: pressed ? 4 : 0 }],
                 },
               ]}
@@ -531,29 +904,12 @@ export default function TrackRunScreen() {
               <Text style={styles.buttonText}>PAUSE</Text>
             </Pressable>
           ) : (
-            /* STATE 3: DI-PAUSE (Menu Resume & Finish) */
             <View style={styles.activeButtonGroup}>
-              <Pressable
-                style={({ pressed }) => [
-                  styles.retroButtonHalf,
-                  {
-                    backgroundColor: "#4ADE80", // Hijau Resume
-                    transform: [{ translateY: pressed ? 4 : 0 }],
-                  },
-                ]}
-                onPress={resumeTracking}
-              >
+              <Pressable style={styles.retroButtonHalf} onPress={startTracking}>
                 <Text style={styles.buttonText}>RESUME</Text>
               </Pressable>
-
               <Pressable
-                style={({ pressed }) => [
-                  styles.retroButtonHalf,
-                  {
-                    backgroundColor: "#E5E7EB", // Abu-abu Finish
-                    transform: [{ translateY: pressed ? 4 : 0 }],
-                  },
-                ]}
+                style={styles.retroButtonHalf}
                 onPress={handleFinishRun}
               >
                 <Text style={styles.buttonText}>FINISH</Text>
@@ -567,9 +923,7 @@ export default function TrackRunScreen() {
 }
 
 const styles = StyleSheet.create({
-  container: {
-    flex: 1,
-  },
+  container: { flex: 1 },
   map: {
     width: Dimensions.get("window").width,
     height: Dimensions.get("window").height,
@@ -580,11 +934,7 @@ const styles = StyleSheet.create({
     alignItems: "center",
     backgroundColor: "#FFFDF9",
   },
-  loadingText: {
-    fontWeight: "900",
-    fontSize: 16,
-  },
-  //game mode button
+  loadingText: { fontWeight: "900", fontSize: 16 },
   gameModeButton: {
     position: "absolute",
     top: 50,
@@ -594,35 +944,49 @@ const styles = StyleSheet.create({
     borderColor: "#000",
     paddingVertical: 10,
     paddingHorizontal: 16,
-    shadowColor: "#000",
-    shadowOffset: { width: 4, height: 4 },
-    shadowOpacity: 1,
-    shadowRadius: 0,
-    elevation: 5,
     zIndex: 10,
+    elevation: 5,
   },
-  gameModeButtonActive: {
-    backgroundColor: "#4ADE80",
-  },
-  gameModeButtonText: {
-    fontWeight: "900",
-    fontSize: 14,
-    color: "#000",
-  },
-  // Coin Marker Style
+  gameModeButtonActive: { backgroundColor: "#4ADE80" },
+  gameModeButtonText: { fontWeight: "900", fontSize: 14, color: "#000" },
   coinMarker: {
     backgroundColor: "#FEF08A",
     borderWidth: 2,
     borderColor: "#000",
     borderRadius: 20,
     padding: 4,
+  },
+  coinText: { fontSize: 16 },
+
+  // Custom Route Banner
+  createRouteBanner: {
+    position: "absolute",
+    top: 50,
+    left: 20,
+    right: 20,
+    backgroundColor: "#FFFDF9",
+    borderWidth: 3,
+    borderColor: "#000",
+    padding: 12,
+    zIndex: 20,
+  },
+  bannerTitle: { fontWeight: "900", fontSize: 16 },
+  bannerSubtitle: { fontSize: 12, color: "#666", marginBottom: 10 },
+  bannerButtonRow: {
+    flexDirection: "row",
+    justifyContent: "space-between",
+    gap: 8,
+  },
+  bannerBtn: {
+    flex: 1,
+    paddingVertical: 8,
     alignItems: "center",
-    justifyContent: "center",
+    borderWidth: 2,
+    borderColor: "#000",
   },
-  coinText: {
-    fontSize: 18,
-  },
-  // Modal Pop Up Styles
+  bannerBtnText: { color: "#FFF", fontWeight: "900", fontSize: 12 },
+
+  // Modal Styles
   modalOverlay: {
     flex: 1,
     backgroundColor: "rgba(0,0,0,0.5)",
@@ -636,56 +1000,60 @@ const styles = StyleSheet.create({
     borderWidth: 4,
     borderColor: "#000",
     padding: 20,
-    shadowColor: "#000",
-    shadowOffset: { width: 6, height: 6 },
-    shadowOpacity: 1,
-    shadowRadius: 0,
-    elevation: 8,
   },
   modalTitle: {
-    fontSize: 20,
+    fontSize: 18,
     fontWeight: "900",
-    marginBottom: 8,
     textAlign: "center",
+    marginBottom: 6,
   },
   modalSubtitle: {
-    fontSize: 14,
-    fontWeight: "600",
-    color: "#555",
-    marginBottom: 20,
+    fontSize: 12,
     textAlign: "center",
+    color: "#666",
+    marginBottom: 16,
   },
-  routeOptionButton: {
-    backgroundColor: "#FEF08A",
+  createOptionBtn: {
+    backgroundColor: "#3B82F6",
     borderWidth: 3,
     borderColor: "#000",
     paddingVertical: 12,
     alignItems: "center",
-    marginBottom: 12,
-    shadowColor: "#000",
-    shadowOffset: { width: 3, height: 3 },
-    shadowOpacity: 1,
-    shadowRadius: 0,
+    marginBottom: 16,
   },
-  routeOptionText: {
-    fontSize: 16,
+  createOptionText: { color: "#FFF", fontWeight: "900", fontSize: 14 },
+  sectionHeader: {
+    fontSize: 12,
     fontWeight: "900",
-    color: "#000",
+    color: "#888",
+    marginBottom: 8,
+  },
+  routeOptionButton: {
+    backgroundColor: "#FEF08A",
+    borderWidth: 2,
+    borderColor: "#000",
+    paddingVertical: 10,
+    paddingHorizontal: 12,
+    marginBottom: 8,
+  },
+  routeOptionText: { fontWeight: "800", fontSize: 13 },
+  emptyText: {
+    fontSize: 12,
+    fontStyle: "italic",
+    color: "#888",
+    marginBottom: 12,
   },
   closeModalButton: {
     backgroundColor: "#E5E7EB",
-    borderWidth: 3,
+    borderWidth: 2,
     borderColor: "#000",
-    paddingVertical: 10,
+    paddingVertical: 8,
     alignItems: "center",
-    marginTop: 10,
+    marginTop: 8,
   },
-  closeModalText: {
-    fontSize: 14,
-    fontWeight: "900",
-    color: "#000",
-  },
-  // Stats Card Styles
+  closeModalText: { fontWeight: "900", fontSize: 12 },
+
+  // Bottom Stats Card
   statsCard: {
     position: "absolute",
     bottom: 30,
@@ -694,54 +1062,24 @@ const styles = StyleSheet.create({
     borderWidth: 4,
     borderColor: "#000000",
     padding: 20,
-    shadowColor: "#000000",
-    shadowOffset: { width: 6, height: 6 },
-    shadowOpacity: 1,
-    shadowRadius: 0,
-    elevation: 6,
   },
   metricsRow: {
     flexDirection: "row",
     justifyContent: "space-between",
     marginBottom: 20,
   },
-  metricItem: {
-    alignItems: "center",
-    flex: 1,
-  },
-  metricLabel: {
-    fontSize: 12,
-    fontWeight: "900",
-    color: "#666",
-    letterSpacing: 1,
-  },
-  metricValue: {
-    fontSize: 28,
-    fontWeight: "900",
-    color: "#000",
-  },
-  unit: {
-    fontSize: 14,
-    fontWeight: "800",
-  },
-  buttonRow: {
-    width: "100%",
-  },
-  activeButtonGroup: {
-    flexDirection: "row",
-    justifyContent: "space-between",
-    gap: 12,
-  },
+  metricItem: { alignItems: "center", flex: 1 },
+  metricLabel: { fontSize: 12, fontWeight: "900", color: "#666" },
+  metricValue: { fontSize: 24, fontWeight: "900", color: "#000" },
+  unit: { fontSize: 14, fontWeight: "800" },
+  buttonRow: { width: "100%" },
+  activeButtonGroup: { flexDirection: "row", gap: 12 },
   retroButton: {
     width: "100%",
     paddingVertical: 14,
     borderWidth: 3,
     borderColor: "#000000",
     alignItems: "center",
-    shadowColor: "#000000",
-    shadowOffset: { width: 4, height: 4 },
-    shadowOpacity: 1,
-    shadowRadius: 0,
   },
   retroButtonHalf: {
     flex: 1,
@@ -749,14 +1087,70 @@ const styles = StyleSheet.create({
     borderWidth: 3,
     borderColor: "#000000",
     alignItems: "center",
-    shadowColor: "#000000",
-    shadowOffset: { width: 4, height: 4 },
-    shadowOpacity: 1,
-    shadowRadius: 0,
+    backgroundColor: "#4ADE80",
   },
   buttonText: {
     fontSize: 16,
     fontWeight: "900",
     color: "#000",
+  },
+  // Retro Finish Modal Styles
+  finishModalCard: {
+    width: "100%",
+    backgroundColor: "#FFFDF9",
+    borderWidth: 4,
+    borderColor: "#000000",
+    padding: 20,
+    shadowColor: "#000000",
+    shadowOffset: { width: 6, height: 6 },
+    shadowOpacity: 1,
+    shadowRadius: 0,
+    elevation: 8,
+  },
+  finishModalTitle: {
+    fontSize: 20,
+    fontWeight: "900",
+    textAlign: "center",
+    marginBottom: 14,
+  },
+  finishStatsBox: {
+    backgroundColor: "#FEF08A",
+    borderWidth: 3,
+    borderColor: "#000000",
+    padding: 12,
+    marginBottom: 12,
+    gap: 4,
+  },
+  finishStatText: {
+    fontSize: 14,
+    fontWeight: "800",
+    color: "#000000",
+  },
+  finishStatHighlight: {
+    fontWeight: "900",
+    fontSize: 16,
+  },
+  finishModalSub: {
+    fontSize: 12,
+    fontWeight: "700",
+    color: "#666666",
+    textAlign: "center",
+    marginBottom: 16,
+  },
+  finishButtonRow: {
+    flexDirection: "row",
+    gap: 10,
+  },
+  retroFinishBtn: {
+    flex: 1,
+    borderWidth: 3,
+    borderColor: "#000000",
+    paddingVertical: 12,
+    alignItems: "center",
+  },
+  retroFinishBtnText: {
+    fontWeight: "900",
+    fontSize: 12,
+    color: "#000000",
   },
 });

@@ -16,7 +16,10 @@
     "ios": {
       "supportsTablet": true,
       "bundleIdentifier": "com.keeprun.app",
-      "googleServicesFile": "./GoogleService-Info.plist"
+      "googleServicesFile": "./GoogleService-Info.plist",
+      "config": {
+        "googleMapsApiKey": "AIzaSyCM8vxXYq31Wue1WQ6W7tzpDGCSm9Vxn14"
+      }
     },
     "android": {
       "adaptiveIcon": {
@@ -26,7 +29,12 @@
       "edgeToEdgeEnabled": true,
       "predictiveBackGestureEnabled": false,
       "package": "com.keeprun.app",
-      "googleServicesFile": "./google-services.json"
+      "googleServicesFile": "./google-services.json",
+      "config": {
+        "googleMaps": {
+          "apiKey": "AIzaSyCM8vxXYq31Wue1WQ6W7tzpDGCSm9Vxn14"
+        }
+      }
     },
     "web": {
       "bundler": "metro",

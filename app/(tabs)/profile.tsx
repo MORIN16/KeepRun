@@ -6,8 +6,8 @@ import {
   collection,
   doc,
   DocumentData,
-  getDoc,
   getDocs,
+  onSnapshot, // Ditambahkan impor onSnapshot di sini
   query,
   QueryDocumentSnapshot,
   where,
@@ -57,19 +57,30 @@ export default function ProfileScreen() {
   }, []);
 
   useEffect(() => {
-    const fetchProfileAndHistory = async () => {
-      if (!user) {
-        setLoading(false);
-        return;
-      }
+    if (!user) {
+      setLoading(false);
+      return;
+    }
 
-      try {
-        const userDocRef = doc(db, "users", user.uid);
-        const userDocSnap = await getDoc(userDocRef);
-        if (userDocSnap.exists()) {
-          setProfileData(userDocSnap.data() as UserProfile);
+    // 1. Listener Realtime Profile User
+    const userDocRef = doc(db, "users", user.uid);
+    const unsubscribeProfile = onSnapshot(
+      userDocRef,
+      (docSnap) => {
+        if (docSnap.exists()) {
+          setProfileData(docSnap.data() as UserProfile);
         }
+        setLoading(false);
+      },
+      (error) => {
+        console.error("Gagal realtime profile:", error);
+        setLoading(false);
+      },
+    );
 
+    // 2. Fetch Riwayat Lari (Tanpa orderBy Firestore agar tidak kena error Index)
+    const fetchHistory = async () => {
+      try {
         const q = query(
           collection(db, "runs"),
           where("userId", "==", user.uid),
@@ -83,18 +94,22 @@ export default function ProfileScreen() {
           },
         );
 
+        // Sorting riwayat lari secara lokal
         runs.sort(
           (a, b) => (b.createdAt?.seconds || 0) - (a.createdAt?.seconds || 0),
         );
         setHistory(runs);
       } catch (error) {
-        console.error("Gagal memuat profil/history:", error);
-      } finally {
-        setLoading(false);
+        console.error("Gagal memuat history:", error);
       }
     };
 
-    fetchProfileAndHistory();
+    fetchHistory();
+
+    // Cleanup Listener
+    return () => {
+      unsubscribeProfile();
+    };
   }, [user]);
 
   const handleSignOut = async () => {
@@ -142,7 +157,6 @@ export default function ProfileScreen() {
             <Text style={styles.emailText}>{user?.email || "No Email"}</Text>
           </View>
 
-          {/* Tombol Settings ikon roda gigi */}
           <Pressable
             style={styles.settingsIconButton}
             onPress={() => router.push("/settings")}
